@@ -51,6 +51,8 @@ pub async fn set_passthrough(
     *state.passthrough.lock().await = flags;
     // Mirror to the grab callback so it gates channels live (plan §4.3).
     state.input_shared.set_passthrough(flags.keyboard, flags.mouse);
+    // If we're locked, start/stop relative-mouse capture to match the flag.
+    crate::input::refresh_cursor_capture(&state.input_shared, flags.mouse);
     Ok(())
 }
 

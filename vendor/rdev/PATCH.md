@@ -1,7 +1,29 @@
-# Vendored `rdev` 0.5.3 — EmulStick patch
+# Vendored `rdev` 0.5.3 — EmulStick patches
 
-This is an unmodified copy of [`rdev` 0.5.3](https://crates.io/crates/rdev/0.5.3)
-**except** for a single macOS-only change in `src/macos/keyboard.rs`.
+Unmodified copy of [`rdev` 0.5.3](https://crates.io/crates/rdev/0.5.3) except for
+two macOS-only changes (Windows/Linux paths untouched).
+
+---
+
+## Patch 2 — relative mouse deltas + line-based scroll (`src/macos/common.rs`)
+
+Two mouse changes in `convert`, both using only `CGEventGetIntegerValueField`
+(thread-safe), unlike the NSEvent bridge:
+
+* `EventType::MouseMove { x, y }` now carries the **relative HID delta**
+  (`MOUSE_EVENT_DELTA_X/Y`) instead of the absolute cursor position, and
+  `*MouseDragged` (movement with a button held) is handled too. This lets the
+  app capture motion while the cursor is frozen via
+  `CGAssociateMouseAndMouseCursorPosition(false)` — without it, a consumed
+  mouse-move doesn't actually stop the OS cursor, so it drifts into screen
+  edges where position-based deltas die.
+* `EventType::Wheel` now reads the **line** delta (`SCROLL_WHEEL_EVENT_DELTA_AXIS_1/2`)
+  instead of the **point** (pixel) delta. Pixel deltas are huge for trackpads
+  and made host scrolling race; line deltas are the natural HID wheel unit.
+
+---
+
+## Patch 1 — skip Text Services Manager on the grab thread
 
 ## The change
 

@@ -96,11 +96,19 @@ pub unsafe fn convert(
         CGEventType::LeftMouseUp => Some(EventType::ButtonRelease(Button::Left)),
         CGEventType::RightMouseDown => Some(EventType::ButtonPress(Button::Right)),
         CGEventType::RightMouseUp => Some(EventType::ButtonRelease(Button::Right)),
-        CGEventType::MouseMoved => {
-            let point = cg_event.location();
+        // EmulStick patch: report relative HID deltas (not absolute position)
+        // so callers can capture movement while the cursor is frozen via
+        // CGAssociateMouseAndMouseCursorPosition(false). Also covers
+        // button-held drags. `x`/`y` carry dx/dy. See PATCH.md.
+        CGEventType::MouseMoved
+        | CGEventType::LeftMouseDragged
+        | CGEventType::RightMouseDragged
+        | CGEventType::OtherMouseDragged => {
+            let dx = cg_event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X);
+            let dy = cg_event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y);
             Some(EventType::MouseMove {
-                x: point.x,
-                y: point.y,
+                x: dx as f64,
+                y: dy as f64,
             })
         }
         CGEventType::KeyDown => {
@@ -124,10 +132,13 @@ pub unsafe fn convert(
             }
         }
         CGEventType::ScrollWheel => {
+            // EmulStick patch: use the *line* (notch) delta, not the *point*
+            // (pixel) delta. Pixel deltas are huge for trackpads, which made
+            // host scrolling race; line deltas are the natural HID wheel unit.
             let delta_y =
-                cg_event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1);
+                cg_event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1);
             let delta_x =
-                cg_event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2);
+                cg_event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_2);
             Some(EventType::Wheel { delta_x, delta_y })
         }
         _ => None,

@@ -30,9 +30,9 @@ use crate::state::AppState;
 /// near the negotiated BLE connection interval (plan §6.3 / §10).
 const FLUSH_INTERVAL: Duration = Duration::from_millis(8);
 
-/// Recenter the cursor once it strays this far (px) from screen centre, so the
-/// operator can't run into a screen edge and lose relative tracking.
-const RECENTER_RADIUS: f64 = 200.0;
+/// Scroll throttle: emit one HID wheel tick per this many accumulated macOS
+/// line-deltas. Higher = slower host scrolling. Tunable.
+const SCROLL_DIVISOR: i32 = 4;
 
 /// Messages from the (sync) grab thread to the (async) writer task.
 enum InputMsg {
@@ -61,10 +61,6 @@ pub struct InputShared {
     keyboard: Mutex<KeyboardState>,
     /// Current mouse button bitmask.
     buttons: AtomicU8,
-    /// Last observed absolute cursor position, for relative-delta computation.
-    last_pos: Mutex<Option<(f64, f64)>>,
-    /// Screen centre, recomputed on each lock-enter.
-    center: Mutex<(f64, f64)>,
 
     /// Ctrl/Alt held flags + edge latch for the lock hotkey.
     ctrl_down: AtomicBool,
@@ -83,8 +79,6 @@ impl InputShared {
             pass_mouse: AtomicBool::new(false),
             keyboard: Mutex::new(KeyboardState::new()),
             buttons: AtomicU8::new(0),
-            last_pos: Mutex::new(None),
-            center: Mutex::new((0.0, 0.0)),
             ctrl_down: AtomicBool::new(false),
             alt_down: AtomicBool::new(false),
             hotkey_engaged: AtomicBool::new(false),
@@ -242,31 +236,14 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
         }
 
         EventType::MouseMove { x, y } => {
-            // Track position even when not forwarding, so the first locked
-            // delta isn't a huge jump from a stale origin.
             if !shared.is_locked() || !shared.pass_mouse.load(Ordering::SeqCst) {
-                if let Ok(mut last) = shared.last_pos.lock() {
-                    *last = Some((*x, *y));
-                }
                 return Some(event);
             }
-
-            let center = shared.center.lock().map(|c| *c).unwrap_or((0.0, 0.0));
-            if let Ok(mut last) = shared.last_pos.lock() {
-                let (dx, dy) = match *last {
-                    Some((px, py)) => ((x - px) as i32, (y - py) as i32),
-                    None => (0, 0),
-                };
-                if dx != 0 || dy != 0 {
-                    shared.send(InputMsg::Move { dx, dy });
-                }
-                // Recenter near edges to keep relative tracking unbounded.
-                if (x - center.0).hypot(y - center.1) > RECENTER_RADIUS {
-                    platform::warp_cursor(center.0, center.1);
-                    *last = Some(center);
-                } else {
-                    *last = Some((*x, *y));
-                }
+            // On macOS `x`/`y` are relative HID deltas (vendored rdev patch),
+            // valid even though the cursor is frozen by `set_cursor_capture`.
+            let (dx, dy) = (*x as i32, *y as i32);
+            if dx != 0 || dy != 0 {
+                shared.send(InputMsg::Move { dx, dy });
             }
             None
         }
@@ -329,6 +306,9 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
     let mut acc_wheel: i32 = 0;
     let mut buttons: u8 = 0;
     let mut interval = tokio::time::interval(FLUSH_INTERVAL);
+    // Keep an even cadence: if a BLE write runs long, skip the missed ticks
+    // instead of firing them back-to-back (which bunches motion / stutters).
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -356,7 +336,9 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
                 }
             }
             _ = interval.tick() => {
-                if acc_dx != 0 || acc_dy != 0 || acc_wheel != 0 {
+                // A sub-divisor wheel remainder alone isn't worth a packet; it
+                // carries until it reaches a full tick or motion flushes.
+                if acc_dx != 0 || acc_dy != 0 || acc_wheel.abs() >= SCROLL_DIVISOR {
                     flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await;
                 }
             }
@@ -364,8 +346,8 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
     }
 }
 
-/// Apply a lock-mode transition: set the flag, (re)compute screen centre on
-/// entry, emit `lock_state`, and on exit send the safe all-up reports (plan §9).
+/// Apply a lock-mode transition: set the flag, manage relative-mouse capture,
+/// emit `lock_state`, and on exit send the safe all-up reports (plan §9).
 async fn set_lock(
     app: &AppHandle,
     active: bool,
@@ -378,18 +360,15 @@ async fn set_lock(
     let shared = &state.input_shared;
 
     if active {
-        if let Ok((w, h)) = rdev::display_size() {
-            if let Ok(mut c) = shared.center.lock() {
-                *c = (w as f64 / 2.0, h as f64 / 2.0);
-            }
-        }
-        if let Ok(mut last) = shared.last_pos.lock() {
-            *last = None;
-        }
-        // Set the flag last so the callback never acts before centre is ready.
         shared.lock_active.store(true, Ordering::SeqCst);
+        // Freeze + decouple the cursor so movement is captured relatively
+        // (only when we're actually grabbing the mouse channel).
+        if shared.pass_mouse.load(Ordering::SeqCst) {
+            platform::set_cursor_capture(true);
+        }
     } else {
         shared.lock_active.store(false, Ordering::SeqCst);
+        platform::set_cursor_capture(false);
         if let Ok(mut kb) = shared.keyboard.lock() {
             kb.reset();
         }
@@ -405,6 +384,14 @@ async fn set_lock(
     events::lock_state(app, active);
 }
 
+/// Update relative-mouse capture when the mouse passthrough flag changes while
+/// already locked (called from `set_passthrough`).
+pub fn refresh_cursor_capture(shared: &InputShared, mouse: bool) {
+    if shared.is_locked() {
+        platform::set_cursor_capture(mouse);
+    }
+}
+
 async fn flush_mouse(
     app: &AppHandle,
     buttons: u8,
@@ -412,12 +399,15 @@ async fn flush_mouse(
     acc_dy: &mut i32,
     acc_wheel: &mut i32,
 ) {
-    for packet in mouse::split_reports(buttons, *acc_dx, *acc_dy, *acc_wheel) {
+    // Throttle scroll: one tick per SCROLL_DIVISOR line-deltas, carrying the
+    // remainder so slow scrolls aren't lost and fast ones don't race.
+    let wheel = *acc_wheel / SCROLL_DIVISOR;
+    *acc_wheel -= wheel * SCROLL_DIVISOR;
+    for packet in mouse::split_reports(buttons, *acc_dx, *acc_dy, wheel) {
         write_mouse(app, &packet).await;
     }
     *acc_dx = 0;
     *acc_dy = 0;
-    *acc_wheel = 0;
 }
 
 async fn write_keyboard(app: &AppHandle, report: &[u8]) {
