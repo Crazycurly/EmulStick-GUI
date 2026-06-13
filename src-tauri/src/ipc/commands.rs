@@ -49,24 +49,34 @@ pub async fn set_passthrough(
     flags: PassthroughFlags,
 ) -> Result<(), String> {
     *state.passthrough.lock().await = flags;
-    // M2/M3: re-evaluate which channels the grab thread should consume.
+    // Mirror to the grab callback so it gates channels live (plan §4.3).
+    state.input_shared.set_passthrough(flags.keyboard, flags.mouse);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn enter_lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // M2 installs the rdev grab here; for now we only own and broadcast state.
-    state.set_locked(true);
-    events::lock_state(&app, true);
+    // Install the grab hook on first use, then route the transition through the
+    // writer task (it owns the canonical state change + event emission).
+    state.input_ctl.lock().await.ensure_started(&app);
+    // Make sure the callback sees the current passthrough flags immediately.
+    let flags = *state.passthrough.lock().await;
+    state.input_shared.set_passthrough(flags.keyboard, flags.mouse);
+    state.input_shared.request_lock(true);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn exit_lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    state.set_locked(false);
-    // Guarantee the host never has stuck keys/buttons after lock exit (plan §9).
-    state.ble.lock().await.release_all().await;
-    events::lock_state(&app, false);
+    if state.input_shared.pipeline_started() {
+        // The writer emits lock_state and sends the safe all-up reports.
+        state.input_shared.request_lock(false);
+    } else {
+        // Pipeline never started — fall back to a direct safe state (plan §9).
+        state.set_locked(false);
+        state.ble.lock().await.release_all().await;
+        events::lock_state(&app, false);
+    }
     Ok(())
 }
 
