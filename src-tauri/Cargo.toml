@@ -1,0 +1,44 @@
+[package]
+name = "emulstick"
+version = "0.1.0"
+description = "Operator-side console for the EmulStick BLE HID emulator"
+authors = ["EmulStick"]
+edition = "2021"
+rust-version = "1.77.2"
+
+# The application logic lives in a library so it can be shared between the
+# desktop binary and (future) integration targets. `cargo test` runs against
+# the rlib, which is how the protocol encoders are validated without hardware.
+[lib]
+name = "emulstick_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime for the BLE data-plane task.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3"
+
+# BLE transport. WinRT on Windows, CoreBluetooth on macOS.
+btleplug = "0.11"
+uuid = "1"
+
+# OS-level global input hooks. `unstable_grab` enables `rdev::grab`, which can
+# *consume* events (return None) — required to swallow reserved system combos.
+rdev = { version = "0.5", features = ["unstable_grab"] }
+
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+# Mirror tauri's custom-protocol feature so release builds embed assets.
+custom-protocol = ["tauri/custom-protocol"]

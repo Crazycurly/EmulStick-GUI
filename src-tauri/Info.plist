@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Shown on the first BLE access prompt (CoreBluetooth). -->
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>EmulStick connects to your EmulStick dongle over Bluetooth to send keyboard and mouse input to the controlled host.</string>
+  <!-- HDMI capture passthrough uses the camera/UVC pipeline. -->
+  <key>NSCameraUsageDescription</key>
+  <string>EmulStick displays the controlled host's screen from your HDMI capture device.</string>
+</dict>
+</plist>
