@@ -8,6 +8,9 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 
+# Machine-specific cargo config (codesign runner with an absolute path)
+.cargo/config.toml
+
 # Editor / OS
 .DS_Store
 .idea/
