@@ -21,88 +21,7 @@
 
 body {
   margin: 0;
-}
-
-main {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 24px 20px 48px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-h1 {
-  font-size: 22px;
-  margin: 0;
-  letter-spacing: 0.5px;
-}
-
-h2 {
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--muted);
-  margin: 0 0 12px;
-}
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.row.wrap {
-  flex-wrap: wrap;
-  justify-content: flex-start;
-}
-
-.badge {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-
-.badge.connected {
-  color: var(--green);
-  border-color: var(--green);
-}
-
-.badge.locked {
-  color: var(--amber);
-  border-color: var(--amber);
-}
-
-.badge.reconnecting {
-  color: var(--amber);
-  border-color: var(--amber);
-}
-
-.reconnect-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 13px;
-  border-color: var(--amber);
+  overflow: hidden;
 }
 
 button {
@@ -115,21 +34,17 @@ button {
   font-weight: 600;
   cursor: pointer;
 }
-
 button:hover {
   filter: brightness(1.1);
 }
-
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-
 button.secondary {
   background: var(--panel-2);
   border: 1px solid var(--border);
 }
-
 button.danger {
   background: var(--red);
 }
@@ -138,31 +53,105 @@ button.danger {
   color: var(--muted);
   font-size: 13px;
 }
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+}
+
+/* ── Compact mode ──────────────────────────────────────────────────────── */
+main.compact {
+  padding: 16px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+h1 {
+  font-size: 18px;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.badge.connected {
+  color: var(--green);
+  border-color: var(--green);
+}
+.badge.reconnecting {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.badge.locked {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.row.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-top: 10px;
 }
 
 .error {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid var(--red);
   color: #fca5a5;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: 8px;
   margin: 0;
+  font-size: 12px;
+}
+
+.reconnect-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 13px;
+  border-color: var(--amber);
 }
 
 ul.devices {
   list-style: none;
-  margin: 0;
+  margin: 12px 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-
 ul.devices li {
   display: flex;
   align-items: center;
@@ -170,58 +159,141 @@ ul.devices li {
   gap: 12px;
   background: var(--panel-2);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 9px 11px;
 }
-
 ul.devices li div {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
+/* Connected device info */
 dl.info {
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 92px 1fr;
   gap: 6px 12px;
-  margin: 0;
+  margin: 12px 0 0;
   font-size: 13px;
 }
-
 dl.info dt {
   color: var(--muted);
 }
-
 dl.info dd {
   margin: 0;
+  word-break: break-all;
 }
-
 .leds {
   display: flex;
-  gap: 8px;
-  margin-top: 14px;
+  gap: 6px;
 }
-
 .led {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
   font-size: 11px;
-  font-weight: 600;
-  padding: 3px 8px;
+  font-weight: 700;
   border-radius: 6px;
   background: var(--panel-2);
   color: var(--muted);
   border: 1px solid var(--border);
 }
-
 .led.on {
   background: var(--green);
   color: #04210f;
   border-color: var(--green);
 }
 
-label {
+/* Passthrough toggle chips */
+.toggles {
+  display: flex;
+  gap: 10px;
+}
+.chip {
+  flex: 1;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.chip.big {
+  padding: 12px;
+  font-size: 14px;
+}
+.chip.on {
+  background: rgba(59, 130, 246, 0.15);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.lock-btn {
+  padding: 14px;
+  font-size: 15px;
+}
+.lock-btn.small {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+
+.screen-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 12px;
+  font-size: 14px;
+}
+.screen-btn.disconnect {
+  background: var(--red);
+  border-color: var(--red);
+  color: white;
+}
+.ico {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* ── KVM mode ──────────────────────────────────────────────────────────── */
+.kvm {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+.kvm-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 44px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 0;
-  font-size: 14px;
-  cursor: pointer;
+  padding: 0 10px;
+  background: linear-gradient(rgba(15, 17, 21, 0.85), rgba(15, 17, 21, 0));
+  z-index: 2;
+}
+.kvm-bar .spacer {
+  flex: 1;
+}
+.kvm-bar .ghost {
+  background: rgba(32, 36, 45, 0.7);
+  border: 1px solid var(--border);
+}
+.kvm-hint {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 17, 21, 0.8);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  z-index: 2;
 }

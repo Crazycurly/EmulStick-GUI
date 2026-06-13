@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { load, type Store } from "@tauri-apps/plugin-store";
   import { commands, events } from "./lib/ipc";
+  import VideoFeed from "./lib/VideoFeed.svelte";
   import type {
     ConnectionState,
     DeviceInfo,
@@ -27,14 +29,18 @@
   let lastError = $state<string | null>(null);
   let reconnecting = $state(false);
   let savedDevice = $state<SavedDevice | null>(null);
+  let view = $state<"compact" | "kvm">("compact");
 
   const connected = $derived(connection === "Connected");
+  const deviceName = $derived(savedDevice?.name ?? info?.model ?? "EmulStick");
 
   let store: Store | null = null;
-  // Distinguishes a user-initiated disconnect (forget) from an unexpected drop.
   let intentional = false;
-  // Bumped to cancel an in-flight reconnect loop.
   let reconnectToken = 0;
+
+  const COMPACT_W = 400;
+  const KVM = { w: 1280, h: 800 };
+  let mainEl: HTMLElement | undefined = $state();
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -46,7 +52,6 @@
         if (s === "Connected") reconnecting = false;
         if (s === "Disconnected") {
           info = null;
-          // Unexpected drop while we remember a device → auto-reconnect.
           if (!intentional && savedDevice) startReconnect();
         }
         scanning = s === "Scanning";
@@ -61,13 +66,11 @@
     (async () => {
       store = await load("emulstick.json");
       savedDevice = (await store.get<SavedDevice>("lastDevice")) ?? null;
-      // Already connected (e.g. after a frontend hot-reload)? Reflect it.
       const di = await commands.getDeviceInfo();
       if (di) {
         info = di;
         connection = "Connected";
       } else if (savedDevice) {
-        // Otherwise auto-reconnect to the last device on startup.
         startReconnect();
       }
     })();
@@ -103,8 +106,7 @@
       await attemptConnect(device.id, device.name);
     });
 
-  /// Retry connecting to the saved device with bounded exponential backoff
-  /// until it succeeds or the user cancels (plan §9).
+  // Retry the saved device with bounded exponential backoff (plan §9).
   async function startReconnect() {
     if (reconnecting) return;
     reconnecting = true;
@@ -125,167 +127,192 @@
 
   async function disconnect() {
     intentional = true;
-    reconnectToken++; // cancel any reconnect loop
+    reconnectToken++;
     reconnecting = false;
     savedDevice = null;
     await store?.delete("lastDevice");
     await store?.save();
     await run(commands.disconnect);
+    await exitKvm();
   }
 
   const toggleLock = () =>
     run(locked ? commands.exitLock : commands.enterLock);
 
-  function updatePassthrough(key: keyof PassthroughFlags, value: boolean) {
+  function setFlag(key: keyof PassthroughFlags, value: boolean) {
     passthrough = { ...passthrough, [key]: value };
     run(() => commands.setPassthrough(passthrough));
   }
 
-  // ── Debug helpers (M1: validate §6 encoders against real hardware) ──────
-  const tapA = () => run(() => commands.debugTapKey(4)); // usage 4 = "a"
+  // Compact mode auto-fits the window to its content (no blank space) and is
+  // not user-resizable; only KVM mode is a large, resizable window.
+  let fitTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Win+Shift+S then release-all, mirroring docs/protocol.md Example 1.1.
-  const winShiftS = () =>
-    run(async () => {
-      await commands.debugSendKeyboard([0xa0, 0, 0x16, 0, 0, 0, 0, 0]);
-      await commands.debugSendKeyboard([0, 0, 0, 0, 0, 0, 0, 0]);
-    });
+  // Auto-size the compact window to its content. Two-pass: size to the measured
+  // content height, then correct for window chrome using the webview's own
+  // innerHeight (robust whether setSize means inner or outer size).
+  async function fitCompact() {
+    if (view !== "compact" || !mainEl) return;
+    try {
+      const win = getCurrentWindow();
+      const content = mainEl.offsetHeight;
+      await win.setResizable(true);
+      await win.setSize(new LogicalSize(COMPACT_W, content));
+      await new Promise((r) => setTimeout(r, 50));
+      const delta = content - window.innerHeight;
+      if (Math.abs(delta) > 1) {
+        await win.setSize(new LogicalSize(COMPACT_W, content + delta));
+      }
+      await win.setResizable(false);
+    } catch {
+      /* window APIs unavailable outside Tauri */
+    }
+  }
 
-  // Nudge the cursor down-right by (40, 40), then stop.
-  const nudgeMouse = () =>
-    run(async () => {
-      await commands.debugSendMouse([0, 40, 0, 40, 0, 0]);
-      await commands.debugSendMouse([0, 0, 0, 0, 0, 0]);
-    });
+  async function enterKvm() {
+    view = "kvm";
+    try {
+      const win = getCurrentWindow();
+      await win.setResizable(true);
+      await win.setSize(new LogicalSize(KVM.w, KVM.h));
+      await win.center();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function exitKvm() {
+    if (view !== "kvm") return;
+    view = "compact"; // the effect below re-fits the compact window
+  }
+
+  // Re-fit whenever the compact content changes size (info load, errors, view…).
+  $effect(() => {
+    if (!mainEl) return;
+    const schedule = () => {
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(fitCompact, 40);
+    };
+    const ro = new ResizeObserver(schedule);
+    ro.observe(mainEl);
+    return () => {
+      ro.disconnect();
+      clearTimeout(fitTimer);
+    };
+  });
+
+  // Clicking the screen grabs input (PiKVM-style). Exit via the Ctrl+Alt hotkey.
+  function grabFromScreen() {
+    if (!locked) toggleLock();
+  }
 </script>
 
-<main>
-  <header>
-    <h1>EmulStick</h1>
-    <span class="badge" class:connected class:locked class:reconnecting>
-      {locked ? "LOCKED · " : ""}{reconnecting ? "Reconnecting…" : connection}
-    </span>
-  </header>
+{#if view === "kvm"}
+  <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
+  <div class="kvm">
+    <VideoFeed onpick={grabFromScreen} />
 
-  {#if lastError}
-    <p class="error" role="alert">{lastError}</p>
-  {/if}
-
-  {#if reconnecting}
-    <div class="card reconnect-banner">
-      <span>Reconnecting to <strong>{savedDevice?.name ?? "device"}</strong>…</span>
-      <button class="secondary" onclick={disconnect}>Stop &amp; forget</button>
-    </div>
-  {/if}
-
-  <section class="card">
-    <div class="row">
-      <h2>Devices</h2>
-      <button onclick={toggleScan}>
-        {scanning ? "Stop scan" : "Scan"}
+    <div class="kvm-bar">
+      <button class="ghost" onclick={exitKvm} title="Back to compact">‹ Back</button>
+      <span class="badge" class:connected class:locked class:reconnecting>
+        {locked ? "LOCKED" : reconnecting ? "Reconnecting…" : connection}
+      </span>
+      <div class="spacer"></div>
+      <button class="chip" class:on={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}>⌨</button>
+      <button class="chip" class:on={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}>🖱</button>
+      <button class="lock-btn small" class:danger={locked} onclick={toggleLock}>
+        {locked ? "Release" : "Grab"}
       </button>
     </div>
-    {#if devices.length === 0}
-      <p class="muted">
-        {scanning ? "Scanning…" : "No devices. Start a scan."}
-      </p>
-    {:else}
-      <ul class="devices">
-        {#each devices as device (device.id)}
-          <li>
-            <div>
-              <strong>{device.name ?? "Unknown"}</strong>
-              <span class="muted mono">{device.id}</span>
-            </div>
-            <div class="row">
-              {#if device.rssi != null}
-                <span class="muted">{device.rssi} dBm</span>
-              {/if}
-              <button
-                onclick={() => connect(device)}
-                disabled={connected || reconnecting}
-              >
-                Connect
-              </button>
-            </div>
-          </li>
-        {/each}
-      </ul>
+
+    {#if !locked}
+      <div class="kvm-hint">Click the screen to capture keyboard &amp; mouse · Ctrl+Alt to release</div>
     {/if}
-  </section>
+  </div>
+{:else}
+  <!-- ── Compact mode ─────────────────────────────────────────────────── -->
+  <main class="compact" bind:this={mainEl}>
+    <header>
+      <h1>EmulStick</h1>
+      <span class="badge" class:connected class:locked class:reconnecting>
+        {locked ? "LOCKED · " : ""}{reconnecting ? "Reconnecting…" : connection}
+      </span>
+    </header>
 
-  {#if connected}
-    <section class="card">
-      <div class="row">
-        <h2>Connected device</h2>
-        <button class="secondary" onclick={disconnect}>Disconnect</button>
-      </div>
-      <dl class="info">
-        <dt>Firmware</dt>
-        <dd>{info?.firmware ?? "—"}</dd>
-        <dt>Model</dt>
-        <dd>{info?.model ?? "—"}</dd>
-        <dt>Manufacturer</dt>
-        <dd>{info?.manufacturer ?? "—"}</dd>
-        <dt>System ID</dt>
-        <dd class="mono">{info?.systemId ?? "—"}</dd>
-      </dl>
-      <div class="leds">
-        <span class="led" class:on={leds.num}>Num</span>
-        <span class="led" class:on={leds.caps}>Caps</span>
-        <span class="led" class:on={leds.scroll}>Scroll</span>
-      </div>
-    </section>
+    {#if lastError}
+      <p class="error" role="alert">{lastError}</p>
+    {/if}
 
-    <section class="card">
-      <h2>Passthrough</h2>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.keyboard}
-          onchange={(e) => updatePassthrough("keyboard", e.currentTarget.checked)}
-        />
-        Keyboard
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.mouse}
-          onchange={(e) => updatePassthrough("mouse", e.currentTarget.checked)}
-        />
-        Mouse
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.video}
-          onchange={(e) => updatePassthrough("video", e.currentTarget.checked)}
-        />
-        Video
-      </label>
-    </section>
-
-    <section class="card">
-      <div class="row">
-        <h2>Lock mode</h2>
-        <button class:danger={locked} onclick={toggleLock}>
-          {locked ? "Exit lock" : "Enter lock"}
-        </button>
+    {#if reconnecting}
+      <div class="card reconnect-banner">
+        <span>Reconnecting to <strong>{deviceName}</strong>…</span>
+        <button class="secondary" onclick={disconnect}>Stop</button>
       </div>
-      <p class="muted">
-        Lock-mode input grabbing arrives in M2. The hotkey will always release
-        the lock so the operator can't get trapped.
-      </p>
-    </section>
+    {/if}
 
-    <section class="card">
-      <h2>Debug · send reports</h2>
-      <p class="muted">Validates the §6 encoders against the dongle.</p>
-      <div class="row wrap">
-        <button onclick={tapA}>Tap “a”</button>
-        <button onclick={winShiftS}>Win+Shift+S</button>
-        <button onclick={nudgeMouse}>Nudge mouse (40,40)</button>
+    {#if !connected && !reconnecting}
+      <section class="card">
+        <div class="row">
+          <h2>Connect a device</h2>
+          <button onclick={toggleScan}>{scanning ? "Stop" : "Scan"}</button>
+        </div>
+        {#if devices.length === 0}
+          <p class="muted">{scanning ? "Scanning…" : "Start a scan to find your EmulStick."}</p>
+        {:else}
+          <ul class="devices">
+            {#each devices as device (device.id)}
+              <li>
+                <div>
+                  <strong>{device.name ?? "Unknown"}</strong>
+                  {#if device.rssi != null}<span class="muted">{device.rssi} dBm</span>{/if}
+                </div>
+                <button onclick={() => connect(device)}>Connect</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+
+    {#if connected}
+      <section class="card">
+        <div class="row">
+          <h2>{deviceName}</h2>
+          <div class="leds">
+            <span class="led" class:on={leds.num}>N</span>
+            <span class="led" class:on={leds.caps}>C</span>
+            <span class="led" class:on={leds.scroll}>S</span>
+          </div>
+        </div>
+        <dl class="info">
+          <dt>Firmware</dt>
+          <dd>{info?.firmware ?? "—"}</dd>
+          <dt>Model</dt>
+          <dd>{info?.model ?? "—"}</dd>
+          <dt>Manufacturer</dt>
+          <dd>{info?.manufacturer ?? "—"}</dd>
+          <dt>System ID</dt>
+          <dd class="mono">{info?.systemId ?? "—"}</dd>
+        </dl>
+      </section>
+
+      <div class="toggles">
+        <button class="chip big" class:on={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}>⌨ Keyboard</button>
+        <button class="chip big" class:on={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}>🖱 Mouse</button>
       </div>
-    </section>
-  {/if}
-</main>
+
+      <button class="lock-btn" class:danger={locked} onclick={toggleLock}>
+        {locked ? "🔒 Exit lock · Ctrl+Alt" : "🔓 Enter lock"}
+      </button>
+
+      <button class="screen-btn" onclick={enterKvm}>🖥 Open screen</button>
+      <button class="screen-btn disconnect" onclick={disconnect}>
+        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 2.5v9" />
+          <path d="M6.6 6.2a7.5 7.5 0 1 0 10.8 0" />
+        </svg>
+        Disconnect
+      </button>
+    {/if}
+  </main>
+{/if}
