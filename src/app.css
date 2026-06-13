@@ -91,6 +91,20 @@ h2 {
   border-color: var(--amber);
 }
 
+.badge.reconnecting {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.reconnect-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  border-color: var(--amber);
+}
+
 button {
   background: var(--accent);
   color: white;

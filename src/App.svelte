@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { UnlistenFn } from "@tauri-apps/api/event";
+  import { load, type Store } from "@tauri-apps/plugin-store";
   import { commands, events } from "./lib/ipc";
   import type {
     ConnectionState,
@@ -9,6 +10,8 @@
     LedReport,
     PassthroughFlags,
   } from "./lib/types";
+
+  type SavedDevice = { id: string; name: string | null };
 
   let connection = $state<ConnectionState>("Disconnected");
   let devices = $state<DiscoveredDevice[]>([]);
@@ -22,16 +25,29 @@
   let locked = $state(false);
   let scanning = $state(false);
   let lastError = $state<string | null>(null);
+  let reconnecting = $state(false);
+  let savedDevice = $state<SavedDevice | null>(null);
 
   const connected = $derived(connection === "Connected");
+
+  let store: Store | null = null;
+  // Distinguishes a user-initiated disconnect (forget) from an unexpected drop.
+  let intentional = false;
+  // Bumped to cancel an in-flight reconnect loop.
+  let reconnectToken = 0;
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   onMount(() => {
     const unlisteners: Promise<UnlistenFn>[] = [
       events.onDevicesChanged((d) => (devices = d)),
       events.onConnectionState((s) => {
         connection = s;
+        if (s === "Connected") reconnecting = false;
         if (s === "Disconnected") {
           info = null;
+          // Unexpected drop while we remember a device → auto-reconnect.
+          if (!intentional && savedDevice) startReconnect();
         }
         scanning = s === "Scanning";
       }),
@@ -41,12 +57,20 @@
     ];
 
     commands.getPassthrough().then((p) => (passthrough = p));
-    commands.getDeviceInfo().then((i) => {
-      if (i) {
-        info = i;
+
+    (async () => {
+      store = await load("emulstick.json");
+      savedDevice = (await store.get<SavedDevice>("lastDevice")) ?? null;
+      // Already connected (e.g. after a frontend hot-reload)? Reflect it.
+      const di = await commands.getDeviceInfo();
+      if (di) {
+        info = di;
         connection = "Connected";
+      } else if (savedDevice) {
+        // Otherwise auto-reconnect to the last device on startup.
+        startReconnect();
       }
-    });
+    })();
 
     return () => {
       for (const u of unlisteners) u.then((fn) => fn());
@@ -65,12 +89,49 @@
   const toggleScan = () =>
     run(scanning ? commands.scanStop : commands.scanStart);
 
-  const connect = (id: string) =>
+  async function attemptConnect(id: string, name: string | null) {
+    info = await commands.connect(id);
+    savedDevice = { id, name };
+    await store?.set("lastDevice", savedDevice);
+    await store?.save();
+    reconnecting = false;
+  }
+
+  const connect = (device: DiscoveredDevice) =>
     run(async () => {
-      info = await commands.connect(id);
+      intentional = false;
+      await attemptConnect(device.id, device.name);
     });
 
-  const disconnect = () => run(commands.disconnect);
+  /// Retry connecting to the saved device with bounded exponential backoff
+  /// until it succeeds or the user cancels (plan §9).
+  async function startReconnect() {
+    if (reconnecting) return;
+    reconnecting = true;
+    const token = ++reconnectToken;
+    let delay = 1000;
+    while (reconnectToken === token && savedDevice) {
+      try {
+        await attemptConnect(savedDevice.id, savedDevice.name);
+        return;
+      } catch {
+        if (reconnectToken !== token) return;
+        await sleep(delay);
+        delay = Math.min(delay * 2, 30000);
+      }
+    }
+    reconnecting = false;
+  }
+
+  async function disconnect() {
+    intentional = true;
+    reconnectToken++; // cancel any reconnect loop
+    reconnecting = false;
+    savedDevice = null;
+    await store?.delete("lastDevice");
+    await store?.save();
+    await run(commands.disconnect);
+  }
 
   const toggleLock = () =>
     run(locked ? commands.exitLock : commands.enterLock);
@@ -101,13 +162,20 @@
 <main>
   <header>
     <h1>EmulStick</h1>
-    <span class="badge" class:connected class:locked>
-      {locked ? "LOCKED · " : ""}{connection}
+    <span class="badge" class:connected class:locked class:reconnecting>
+      {locked ? "LOCKED · " : ""}{reconnecting ? "Reconnecting…" : connection}
     </span>
   </header>
 
   {#if lastError}
     <p class="error" role="alert">{lastError}</p>
+  {/if}
+
+  {#if reconnecting}
+    <div class="card reconnect-banner">
+      <span>Reconnecting to <strong>{savedDevice?.name ?? "device"}</strong>…</span>
+      <button class="secondary" onclick={disconnect}>Stop &amp; forget</button>
+    </div>
   {/if}
 
   <section class="card">
@@ -133,7 +201,10 @@
               {#if device.rssi != null}
                 <span class="muted">{device.rssi} dBm</span>
               {/if}
-              <button onclick={() => connect(device.id)} disabled={connected}>
+              <button
+                onclick={() => connect(device)}
+                disabled={connected || reconnecting}
+              >
                 Connect
               </button>
             </div>
