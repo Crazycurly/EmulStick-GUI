@@ -67,7 +67,7 @@ A **control plane** (Svelte frontend) is split from a **data plane** (Rust backe
   - `ipc/` — Tauri commands + events.
   - `state.rs` — passthrough flags and lock state.
 
-See [`docs/plan.md`](docs/plan.md) for the full engineering design, and [`docs/protocol.md`](docs/protocol.md) / [`docs/ble-protocol.md`](docs/ble-protocol.md) for the wire format.
+See [`docs/plan.md`](docs/plan.md) for the full engineering design, and [`docs/protocol.md`](docs/protocol.md) / [`docs/ble-protocol.md`](docs/ble-protocol.md) for the wire format — both derived from the official [EmulStick BLE protocol specification (v0.93)](https://www.emulstick.com/files/emulstick_ble_v0.93.pdf).
 
 ## Status
 
