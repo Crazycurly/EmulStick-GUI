@@ -24,7 +24,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use crate::ipc::events;
 use crate::protocol::mouse::button as mbtn;
 use crate::protocol::{mouse, KeyboardState, KEYBOARD_RELEASE_ALL, MOUSE_RELEASE_ALL};
-use crate::state::AppState;
+use crate::state::{AppState, PassthroughFlags};
 
 /// Mouse flush cadence. Decouples ~1000 Hz input from the BLE pipe; should sit
 /// near the negotiated BLE connection interval (plan §6.3 / §10).
@@ -67,6 +67,12 @@ pub struct InputShared {
     alt_down: AtomicBool,
     hotkey_engaged: AtomicBool,
 
+    /// Whether a grab hook is currently installed and running. Set when the
+    /// grab thread is spawned, cleared if `rdev::grab` returns an error, so a
+    /// later lock-enter can re-install it (e.g. after Accessibility is granted
+    /// — otherwise a one-time failure would wedge lock mode "on but blind").
+    grab_active: AtomicBool,
+
     /// Sender to the writer task, populated once the pipeline starts.
     tx: OnceLock<UnboundedSender<InputMsg>>,
 }
@@ -82,6 +88,7 @@ impl InputShared {
             ctrl_down: AtomicBool::new(false),
             alt_down: AtomicBool::new(false),
             hotkey_engaged: AtomicBool::new(false),
+            grab_active: AtomicBool::new(false),
             tx: OnceLock::new(),
         }
     }
@@ -144,52 +151,54 @@ impl InputController {
         }
     }
 
-    /// Install the grab hook + writer task once. Subsequent calls are no-ops.
-    /// On macOS the grab fails until Accessibility is granted; that surfaces as
-    /// an `error` event from the grab thread (plan §5).
+    /// Install the grab hook + writer task. The channel and async writer are
+    /// created exactly once; the grab hook is (re)installed whenever one isn't
+    /// already running. On macOS the grab fails until Accessibility is granted;
+    /// that surfaces as an `error` event from the grab thread (plan §5), and
+    /// because the thread clears `grab_active` on failure a later lock-enter can
+    /// retry the install once the permission is granted.
     pub fn ensure_started(&mut self, app: &AppHandle) {
-        if self.started {
+        // One-time: the channel + async writer task (owns BLE I/O + §6.3
+        // coalescing). The `tx` OnceLock must only ever be set once.
+        if !self.started {
+            self.started = true;
+            let (tx, rx) = unbounded_channel::<InputMsg>();
+            let _ = self.shared.tx.set(tx);
+            let app = app.clone();
+            self._writer = Some(tauri::async_runtime::spawn(writer_loop(app, rx)));
+        }
+
+        // (Re)install the grab hook only if one isn't already resident. rdev's
+        // `grab()` can't be stopped, so a live hook stays installed and just
+        // becomes transparent when unlocked; a failed one (no Accessibility)
+        // exits and clears the flag, so we can install a fresh hook here.
+        if self.shared.grab_active.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.started = true;
-
-        let (tx, rx) = unbounded_channel::<InputMsg>();
-        let _ = self.shared.tx.set(tx);
-
-        // Async writer task: owns the BLE-facing side and §6.3 coalescing.
-        let writer = {
-            let app = app.clone();
-            tauri::async_runtime::spawn(writer_loop(app, rx))
-        };
-
-        // Dedicated OS thread for the (blocking) grab event loop.
-        let grab_thread = {
-            let shared = self.shared.clone();
-            let app = app.clone();
-            std::thread::Builder::new()
-                .name("rdev-grab".into())
-                .spawn(move || {
-                    let cb_shared = shared.clone();
-                    tracing::info!("installing global input grab hook");
-                    let result = rdev::grab(move |event| handle_event(&cb_shared, event));
-                    if let Err(e) = result {
-                        tracing::error!(?e, "rdev::grab failed (Accessibility permission?)");
-                        events::error(
-                            &app,
-                            "input_grab_failed",
-                            format!(
-                                "Could not install the global input hook ({e:?}). On macOS, \
-                                 enable this app under System Settings → Privacy & Security → \
-                                 Accessibility, then relaunch."
-                            ),
-                        );
-                    }
-                })
-                .ok()
-        };
-
-        self._writer = Some(writer);
-        self._grab_thread = grab_thread;
+        let shared = self.shared.clone();
+        let app = app.clone();
+        self._grab_thread = std::thread::Builder::new()
+            .name("rdev-grab".into())
+            .spawn(move || {
+                let cb_shared = shared.clone();
+                tracing::info!("installing global input grab hook");
+                let result = rdev::grab(move |event| handle_event(&cb_shared, event));
+                if let Err(e) = result {
+                    // Re-arm so a later lock-enter retries the install.
+                    shared.grab_active.store(false, Ordering::SeqCst);
+                    tracing::error!(?e, "rdev::grab failed (Accessibility permission?)");
+                    events::error(
+                        &app,
+                        "input_grab_failed",
+                        format!(
+                            "Could not install the global input hook ({e:?}). On macOS, \
+                             enable this app under System Settings → Privacy & Security → \
+                             Accessibility, then relaunch."
+                        ),
+                    );
+                }
+            })
+            .ok();
     }
 }
 
@@ -214,7 +223,21 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
                 return Some(event);
             }
             if let Ok(mut kb) = shared.keyboard.lock() {
-                if kb.apply(key, pressed) {
+                if matches!(key, Key::CapsLock) {
+                    // macOS delivers Caps Lock as a `FlagsChanged` toggle, so
+                    // rdev reports a lone KeyPress when the LED turns on and a
+                    // lone KeyRelease when it turns off — one alternating event
+                    // per physical tap, tracking the lock state, not the key.
+                    // Mirroring that press/release would only hand the host a
+                    // key-down edge (what actually toggles its caps) every
+                    // *other* tap, and leave Caps Lock held in between. So emit
+                    // a full down→up tap on every event: one host toggle per
+                    // physical press, and never left held.
+                    kb.apply(key, true);
+                    shared.send(InputMsg::Keyboard(kb.report()));
+                    kb.apply(key, false);
+                    shared.send(InputMsg::Keyboard(kb.report()));
+                } else if kb.apply(key, pressed) {
                     shared.send(InputMsg::Keyboard(kb.report()));
                 }
             }
@@ -252,6 +275,9 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
             if !shared.is_locked() || !shared.pass_mouse.load(Ordering::SeqCst) {
                 return Some(event);
             }
+            // Horizontal scroll (`delta_x`) is intentionally dropped: the F803
+            // report carries a single signed wheel byte (vertical only), so
+            // there's nowhere to forward it. Vertical-only by design (plan §IV).
             shared.send(InputMsg::Wheel(*delta_y as i32));
             None
         }
@@ -266,6 +292,10 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
 fn track_hotkey(shared: &InputShared, key: &Key, pressed: bool) -> bool {
     match key {
         Key::ControlLeft | Key::ControlRight => shared.ctrl_down.store(pressed, Ordering::SeqCst),
+        // NOTE(windows): when Windows support lands, AltGr synthesises
+        // LeftCtrl+RightAlt, so on an international layout typing AltGr would
+        // trip this exit hotkey. Revisit the combo (or detect synthetic Ctrl)
+        // before shipping the Windows grab path.
         Key::Alt | Key::AltGr => shared.alt_down.store(pressed, Ordering::SeqCst),
         _ => return false,
     }
@@ -301,6 +331,10 @@ fn button_mask(button: &Button) -> Option<u8> {
 /// Async writer: forwards keyboard reports immediately and coalesces mouse
 /// motion/wheel, flushing once per [`FLUSH_INTERVAL`] (plan §6.3).
 async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
+    // Resolve the managed state once, not on every report: the hot path runs at
+    // the input rate (~1 kHz keys / 125 Hz mouse flushes), and `state()` is a
+    // typemap lookup. `&state` deref-coerces to `&AppState` at each call site.
+    let state = app.state::<AppState>();
     let mut acc_dx: i32 = 0;
     let mut acc_dy: i32 = 0;
     let mut acc_wheel: i32 = 0;
@@ -316,15 +350,15 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
                 let Some(msg) = msg else { break };
                 match msg {
                     InputMsg::Keyboard(report) => {
-                        if !write_keyboard(&app, &report).await {
-                            reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
+                        if !write_keyboard(&state, &report).await {
+                            reset_input_state(&state, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
                         }
                     }
                     InputMsg::Buttons(mask) => {
                         buttons = mask;
                         // Latency-sensitive: flush now, carrying pending motion.
-                        if !flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
-                            reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
+                        if !flush_mouse(&state, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
+                            reset_input_state(&state, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
                         }
                     }
                     InputMsg::Move { dx, dy } => {
@@ -335,7 +369,7 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
                         acc_wheel += w;
                     }
                     InputMsg::SetLock(active) => {
-                        set_lock(&app, active, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await;
+                        set_lock(&app, &state, active, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await;
                     }
                 }
             }
@@ -343,8 +377,8 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
                 // A sub-divisor wheel remainder alone isn't worth a packet; it
                 // carries until it reaches a full tick or motion flushes.
                 let pending = acc_dx != 0 || acc_dy != 0 || acc_wheel.abs() >= SCROLL_DIVISOR;
-                if pending && !flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
-                    reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
+                if pending && !flush_mouse(&state, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
+                    reset_input_state(&state, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
                 }
             }
         }
@@ -355,13 +389,13 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
 /// emit `lock_state`, and on exit send the safe all-up reports (plan §9).
 async fn set_lock(
     app: &AppHandle,
+    state: &AppState,
     active: bool,
     buttons: &mut u8,
     acc_dx: &mut i32,
     acc_dy: &mut i32,
     acc_wheel: &mut i32,
 ) {
-    let state = app.state::<AppState>();
     let shared = &state.input_shared;
 
     if active {
@@ -382,18 +416,43 @@ async fn set_lock(
         *acc_dx = 0;
         *acc_dy = 0;
         *acc_wheel = 0;
-        write_keyboard(app, &KEYBOARD_RELEASE_ALL).await;
-        write_mouse(app, &MOUSE_RELEASE_ALL).await;
+        write_keyboard(state, &KEYBOARD_RELEASE_ALL).await;
+        write_mouse(state, &MOUSE_RELEASE_ALL).await;
     }
 
     events::lock_state(app, active);
 }
 
 /// Update relative-mouse capture when the mouse passthrough flag changes while
-/// already locked (called from `set_passthrough`).
-pub fn refresh_cursor_capture(shared: &InputShared, mouse: bool) {
+/// already locked.
+fn refresh_cursor_capture(shared: &InputShared, mouse: bool) {
     if shared.is_locked() {
         platform::set_cursor_capture(mouse);
+    }
+}
+
+/// React to a passthrough-flag change (plan §4.3 / §9), called from
+/// `set_passthrough`. Always refreshes relative-mouse capture to match the
+/// mouse flag; additionally, if a channel is switched **off while locked**,
+/// it releases whatever that channel left held on the host and clears our
+/// logical model — otherwise a key/button held at the moment the operator
+/// disables its channel would stick pressed on the host forever (its release
+/// event now passes straight through to the operator OS instead of the host).
+pub fn on_passthrough_changed(shared: &InputShared, prev: PassthroughFlags, next: PassthroughFlags) {
+    refresh_cursor_capture(shared, next.mouse);
+    if !shared.is_locked() {
+        return;
+    }
+    if prev.keyboard && !next.keyboard {
+        if let Ok(mut kb) = shared.keyboard.lock() {
+            kb.reset();
+        }
+        shared.send(InputMsg::Keyboard(KEYBOARD_RELEASE_ALL));
+    }
+    if prev.mouse && !next.mouse {
+        shared.buttons.store(0, Ordering::SeqCst);
+        // A zero-button, zero-motion flush clears any held button on the host.
+        shared.send(InputMsg::Buttons(0));
     }
 }
 
@@ -434,7 +493,7 @@ pub fn emergency_unlock(shared: &InputShared) {
 /// Flush coalesced motion/wheel as F803 packets. Returns `false` if any GATT
 /// write failed (so the caller can drop to a safe state, plan §9).
 async fn flush_mouse(
-    app: &AppHandle,
+    state: &AppState,
     buttons: u8,
     acc_dx: &mut i32,
     acc_dy: &mut i32,
@@ -446,7 +505,7 @@ async fn flush_mouse(
     *acc_wheel -= wheel * SCROLL_DIVISOR;
     let mut ok = true;
     for packet in mouse::split_reports(buttons, *acc_dx, *acc_dy, wheel) {
-        ok &= write_mouse(app, &packet).await;
+        ok &= write_mouse(state, &packet).await;
     }
     *acc_dx = 0;
     *acc_dy = 0;
@@ -454,25 +513,13 @@ async fn flush_mouse(
 }
 
 /// Write a keyboard report; returns `false` if the GATT write failed.
-async fn write_keyboard(app: &AppHandle, report: &[u8]) -> bool {
-    app.state::<AppState>()
-        .ble
-        .lock()
-        .await
-        .write_keyboard(report)
-        .await
-        .is_ok()
+async fn write_keyboard(state: &AppState, report: &[u8]) -> bool {
+    state.ble.lock().await.write_keyboard(report).await.is_ok()
 }
 
 /// Write a mouse report; returns `false` if the GATT write failed.
-async fn write_mouse(app: &AppHandle, report: &[u8]) -> bool {
-    app.state::<AppState>()
-        .ble
-        .lock()
-        .await
-        .write_mouse(report)
-        .await
-        .is_ok()
+async fn write_mouse(state: &AppState, report: &[u8]) -> bool {
+    state.ble.lock().await.write_mouse(report).await.is_ok()
 }
 
 /// Drop to a safe logical state after a GATT write fails (plan §9): forget all
@@ -481,13 +528,13 @@ async fn write_mouse(app: &AppHandle, report: &[u8]) -> bool {
 /// (re)connect ([`crate::ble::BleManager::connect`]); the link is down now, so
 /// we can only fix our own model here.
 fn reset_input_state(
-    app: &AppHandle,
+    state: &AppState,
     buttons: &mut u8,
     acc_dx: &mut i32,
     acc_dy: &mut i32,
     acc_wheel: &mut i32,
 ) {
-    let shared = &app.state::<AppState>().input_shared;
+    let shared = &state.input_shared;
     if let Ok(mut kb) = shared.keyboard.lock() {
         kb.reset();
     }

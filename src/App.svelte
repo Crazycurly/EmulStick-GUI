@@ -83,18 +83,39 @@
       }),
       events.onKeyboardLeds((l) => (leds = l)),
       events.onError((e) => {
-        lastError = `${e.code}: ${e.message}`;
         // The grab thread couldn't install the hook → almost always a missing
-        // macOS Accessibility grant. Surface the onboarding card (plan §5).
-        if (e.code === "input_grab_failed") needsAccessibility = true;
+        // macOS Accessibility grant. The onboarding card is the user-facing
+        // surface for that, so don't also show a raw error line (plan §5).
+        if (e.code === "input_grab_failed") {
+          needsAccessibility = true;
+          return;
+        }
+        lastError = humanize(e.message);
       }),
     ];
 
-    commands.getPassthrough().then((p) => (passthrough = p));
+    // When the operator returns from System Settings (window regains focus),
+    // re-check the Accessibility grant so the onboarding card clears itself
+    // without a manual "Re-check" click.
+    const onFocus = () => {
+      if (needsAccessibility) recheckAccessibility();
+    };
+    window.addEventListener("focus", onFocus);
 
     (async () => {
       store = await load("emulstick.json");
       savedDevice = (await store.get<SavedDevice>("lastDevice")) ?? null;
+      // Restore the operator's channel choices. Lock stays off on startup, so
+      // nothing is grabbed until they explicitly lock — restoring the flags is
+      // safe and saves re-toggling them every launch. Fall back to the
+      // backend's current flags if none were persisted.
+      const savedPass = await store.get<PassthroughFlags>("passthrough");
+      if (savedPass) {
+        passthrough = savedPass;
+        await commands.setPassthrough(savedPass);
+      } else {
+        passthrough = await commands.getPassthrough();
+      }
       const di = await commands.getDeviceInfo();
       if (di) {
         info = di;
@@ -106,15 +127,28 @@
 
     return () => {
       for (const u of unlisteners) u.then((fn) => fn());
+      window.removeEventListener("focus", onFocus);
     };
   });
+
+  // Map known backend error strings to operator-friendly text; pass others
+  // through unchanged so nothing is hidden.
+  function humanize(msg: string): string {
+    if (/no bluetooth adapter/i.test(msg))
+      return "No Bluetooth adapter found — make sure Bluetooth is turned on.";
+    if (/timed out/i.test(msg))
+      return `${msg} Check the device is powered on and in range.`;
+    if (/not found/i.test(msg))
+      return "Device not found — is it powered on and in range?";
+    return msg;
+  }
 
   async function run(action: () => Promise<unknown>) {
     lastError = null;
     try {
       await action();
     } catch (e) {
-      lastError = String(e);
+      lastError = humanize(String(e));
     }
   }
 
@@ -189,9 +223,12 @@
     if (ok) lastError = null;
   }
 
-  function setFlag(key: keyof PassthroughFlags, value: boolean) {
+  async function setFlag(key: keyof PassthroughFlags, value: boolean) {
     passthrough = { ...passthrough, [key]: value };
-    run(() => commands.setPassthrough(passthrough));
+    await run(() => commands.setPassthrough(passthrough));
+    // Persist so the choice survives a restart (see the restore in onMount).
+    await store?.set("passthrough", passthrough);
+    await store?.save();
   }
 
   // Compact mode auto-fits the window to its content (no blank space) and is
@@ -311,6 +348,13 @@
       </button>
     </div>
 
+    {#if lastError}
+      <div class="kvm-error" role="alert">
+        <span>{lastError}</span>
+        <button class="error-x" onclick={() => (lastError = null)} aria-label="Dismiss error">✕</button>
+      </div>
+    {/if}
+
     {#if needsAccessibility}
       <div class="kvm-hint onboard-hint">
         Accessibility access needed —
@@ -336,7 +380,10 @@
     </header>
 
     {#if lastError}
-      <p class="error" role="alert">{lastError}</p>
+      <div class="error" role="alert">
+        <span>{lastError}</span>
+        <button class="error-x" onclick={() => (lastError = null)} aria-label="Dismiss error">✕</button>
+      </div>
     {/if}
 
     {#if needsAccessibility}

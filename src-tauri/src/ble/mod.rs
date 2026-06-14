@@ -28,6 +28,21 @@ use crate::state::AppState;
 /// that don't advertise the F800 service UUID in their advertisement packet.
 const NAME_HINT: &str = "emul";
 
+/// Cap on a single GATT connect + service-discovery round (plan §9). Without it
+/// CoreBluetooth can leave `connect()`/`discover_services()` pending forever,
+/// holding the BLE mutex — which blocks the writer task and every command, and
+/// silently defeats the frontend's reconnect backoff (it awaits a call that
+/// never returns). On timeout we surface an error so the backoff retries.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a user-initiated scan runs before auto-stopping. A scan keeps the
+/// radio busy and the poller running; if the operator walks away we shouldn't
+/// scan forever. The UI flips back to idle via the `Disconnected` event.
+const SCAN_DURATION: Duration = Duration::from_secs(30);
+
+/// How often the scan poller re-enumerates discovered peripherals.
+const SCAN_POLL_INTERVAL: Duration = Duration::from_millis(1200);
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -112,6 +127,7 @@ impl BleManager {
             let app = app.clone();
             let adapter = adapter.clone();
             tauri::async_runtime::spawn(async move {
+                let deadline = tokio::time::Instant::now() + SCAN_DURATION;
                 while !stop.load(Ordering::SeqCst) {
                     if let Ok(peripherals) = adapter.peripherals().await {
                         let mut devices = Vec::new();
@@ -128,7 +144,15 @@ impl BleManager {
                         }
                         events::devices_changed(&app, &devices);
                     }
-                    tokio::time::sleep(Duration::from_millis(1200)).await;
+                    // Auto-stop so the radio doesn't scan forever if the
+                    // operator never connects (plan §10). The UI returns to idle
+                    // on the `Disconnected` event.
+                    if tokio::time::Instant::now() >= deadline {
+                        let _ = adapter.stop_scan().await;
+                        events::connection_state(&app, ConnectionState::Disconnected);
+                        break;
+                    }
+                    tokio::time::sleep(SCAN_POLL_INTERVAL).await;
                 }
             })
         };
@@ -168,9 +192,15 @@ impl BleManager {
         let peripheral = find_or_scan(&adapter, id).await?;
 
         if !peripheral.is_connected().await.map_err(err)? {
-            peripheral.connect().await.map_err(err)?;
+            tokio::time::timeout(CONNECT_TIMEOUT, peripheral.connect())
+                .await
+                .map_err(|_| "Connection attempt timed out".to_string())?
+                .map_err(err)?;
         }
-        peripheral.discover_services().await.map_err(err)?;
+        tokio::time::timeout(CONNECT_TIMEOUT, peripheral.discover_services())
+            .await
+            .map_err(|_| "Service discovery timed out".to_string())?
+            .map_err(err)?;
 
         let chars = peripheral.characteristics();
         let keyboard = chars

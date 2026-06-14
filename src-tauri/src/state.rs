@@ -13,23 +13,15 @@ use crate::input::{InputController, InputShared};
 /// The three independent passthrough flags (plan §4.3). When a flag is off the
 /// corresponding channel is *not* grabbed and behaves normally on the operator
 /// OS; when on it is grabbed and forwarded to the host.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// The `Default` (all `false`) is the conservative state: forward nothing until
+/// the operator opts a channel in.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PassthroughFlags {
     pub keyboard: bool,
     pub mouse: bool,
     pub video: bool,
-}
-
-impl Default for PassthroughFlags {
-    fn default() -> Self {
-        // Conservative default: forward nothing until the operator opts in.
-        Self {
-            keyboard: false,
-            mouse: false,
-            video: false,
-        }
-    }
 }
 
 /// Root application state managed by Tauri.
