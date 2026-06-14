@@ -21,6 +21,11 @@
   // deviceId currently streaming — guards the $effect against redundant restarts.
   let activeId = "";
 
+  async function refreshDevices() {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    devices = all.filter((d) => d.kind === "videoinput");
+  }
+
   async function startStream() {
     stopStream();
     error = null;
@@ -33,11 +38,21 @@
           : { width: { ideal: 1920 }, height: { ideal: 1080 } },
       });
       if (videoEl) videoEl.srcObject = stream;
+      // Surface an unplugged capture device (the track ends) instead of
+      // freezing on the last frame; clearing the selection lets Retry — or a
+      // re-plug via `devicechange` — pick up an available device.
+      const track = stream.getVideoTracks()[0];
+      if (track)
+        track.onended = () => {
+          error = "Capture device disconnected.";
+          stopStream();
+          activeId = "";
+          selectedId = "";
+          refreshDevices();
+        };
       // Labels are only populated once capture permission is granted.
-      const all = await navigator.mediaDevices.enumerateDevices();
-      devices = all.filter((d) => d.kind === "videoinput");
-      const actual =
-        stream.getVideoTracks()[0]?.getSettings().deviceId ?? want ?? devices[0]?.deviceId ?? "";
+      await refreshDevices();
+      const actual = track?.getSettings().deviceId ?? want ?? devices[0]?.deviceId ?? "";
       activeId = actual;
       if (selectedId !== actual) selectedId = actual;
     } catch (e) {
@@ -51,13 +66,26 @@
     if (videoEl) videoEl.srcObject = null;
   }
 
+  // Keep the picker in sync with hot-plugged hardware, and auto-recover the
+  // feed if a device reappears after we lost it.
+  function onDeviceChange() {
+    refreshDevices();
+    if (!stream) startStream();
+  }
+
   // Restart when the parent's source picker selects a different device.
   $effect(() => {
     if (selectedId && selectedId !== activeId) startStream();
   });
 
-  onMount(() => startStream());
-  onDestroy(stopStream);
+  onMount(() => {
+    startStream();
+    navigator.mediaDevices.addEventListener("devicechange", onDeviceChange);
+  });
+  onDestroy(() => {
+    stopStream();
+    navigator.mediaDevices.removeEventListener("devicechange", onDeviceChange);
+  });
 </script>
 
 <div class="video-wrap" onclick={onpick} role="presentation">

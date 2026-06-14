@@ -7,12 +7,13 @@ export interface DiscoveredDevice {
   rssi: number | null;
 }
 
+// Auto-reconnect is frontend-driven (see App.svelte's `reconnecting` flag); the
+// backend never emits a "Reconnecting" state, so it isn't part of this union.
 export type ConnectionState =
   | "Scanning"
   | "Connecting"
   | "Connected"
-  | "Disconnected"
-  | "Reconnecting";
+  | "Disconnected";
 
 export interface DeviceInfo {
   firmware: string | null;

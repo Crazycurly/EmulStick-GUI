@@ -17,13 +17,16 @@ pub struct DiscoveredDevice {
 }
 
 /// Connection lifecycle, broadcast to the UI via the `connection_state` event.
+///
+/// Note: there is no `Reconnecting` here — auto-reconnect is driven by the
+/// frontend (it re-issues `connect` with backoff after a `Disconnected`), which
+/// owns its own "Reconnecting…" presentation.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConnectionState {
     Scanning,
     Connecting,
     Connected,
     Disconnected,
-    Reconnecting,
 }
 
 /// Device Information Service readout shown after connect (plan §4.1).

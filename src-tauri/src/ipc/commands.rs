@@ -3,7 +3,7 @@
 
 use tauri::{AppHandle, State};
 
-use crate::ipc::{events, DeviceInfo};
+use crate::ipc::{events, ConnectionState, DeviceInfo};
 use crate::protocol::{keyboard::KEYBOARD_REPORT_LEN, mouse::MOUSE_REPORT_LEN};
 use crate::state::{AppState, PassthroughFlags};
 
@@ -13,8 +13,12 @@ pub async fn scan_start(app: AppHandle, state: State<'_, AppState>) -> Result<()
 }
 
 #[tauri::command]
-pub async fn scan_stop(state: State<'_, AppState>) -> Result<(), String> {
-    state.ble.lock().await.scan_stop().await
+pub async fn scan_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.ble.lock().await.scan_stop().await?;
+    // The manager's `scan_stop` is event-free so internal callers (connect)
+    // don't flicker; a user-initiated stop returns the UI to idle here.
+    events::connection_state(&app, ConnectionState::Disconnected);
+    Ok(())
 }
 
 #[tauri::command]
@@ -48,11 +52,17 @@ pub async fn set_passthrough(
     state: State<'_, AppState>,
     flags: PassthroughFlags,
 ) -> Result<(), String> {
-    *state.passthrough.lock().await = flags;
+    let prev = {
+        let mut guard = state.passthrough.lock().await;
+        let prev = *guard;
+        *guard = flags;
+        prev
+    };
     // Mirror to the grab callback so it gates channels live (plan §4.3).
     state.input_shared.set_passthrough(flags.keyboard, flags.mouse);
-    // If we're locked, start/stop relative-mouse capture to match the flag.
-    crate::input::refresh_cursor_capture(&state.input_shared, flags.mouse);
+    // Refresh relative-mouse capture, and if a channel was switched off while
+    // locked, release whatever it left held on the host (plan §9).
+    crate::input::on_passthrough_changed(&state.input_shared, prev, flags);
     Ok(())
 }
 

@@ -126,6 +126,10 @@ h2 {
 }
 
 .error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid var(--red);
   color: #fca5a5;
@@ -133,6 +137,43 @@ h2 {
   border-radius: 8px;
   margin: 0;
   font-size: 12px;
+}
+/* Dismiss "✕" shared by the compact and KVM error banners. */
+.error-x {
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+  flex: none;
+}
+.error-x:hover {
+  opacity: 1;
+  filter: none;
+  background: none;
+}
+/* KVM-mode error banner: a glass pill below the toolbar, separate from the
+   bottom status hints so failures stay visible in full-screen mode. */
+.kvm-error {
+  position: absolute;
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(560px, 90%);
+  background: rgba(40, 12, 12, 0.92);
+  border: 1px solid var(--red);
+  color: #fca5a5;
+  font-size: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  z-index: 3;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
 
 .reconnect-banner {
