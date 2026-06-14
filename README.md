@@ -4,6 +4,8 @@
 
 # EmulStick Desktop
 
+**English** · [繁體中文](README.zh-TW.md)
+
 **Wirelessly drive another machine's keyboard &amp; mouse — a Bluetooth-LE HID KVM, right on your desktop.**
 
 [![platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-4c6ef5?style=flat-square)](#prerequisites)
