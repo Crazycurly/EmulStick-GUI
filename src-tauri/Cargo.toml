@@ -42,6 +42,12 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Win32 cursor control for relative-mouse capture (input/platform.rs):
+# ShowCursor, SetCursorPos, GetSystemMetrics. rdev already pulls in winapi 0.3,
+# so cargo unifies the build — this just adds the feature gate we call directly.
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser"] }
+
 [features]
 # Mirror tauri's custom-protocol feature so release builds embed assets.
 custom-protocol = ["tauri/custom-protocol"]

@@ -1,7 +1,18 @@
 # Vendored `rdev` 0.5.3 — EmulStick patches
 
 Unmodified copy of [`rdev` 0.5.3](https://crates.io/crates/rdev/0.5.3) except for
-two macOS-only changes (Windows/Linux paths untouched).
+two macOS-only changes (Patches 1–2) and one Windows keycode addition (Patch 3).
+
+---
+
+## Patch 3 — Windows: map Right-Win / VK 92 (`src/windows/keycodes.rs`)
+
+Upstream's `decl_keycodes!` table has `MetaLeft` (VK 91) but omits the Right
+Windows key (VK 92), so it decodes to `Key::Unknown(92)` and the keymap drops
+it. Added `MetaRight, 92` so the right `Win` key forwards as Right-GUI, matching
+the left key and `protocol::keymap`'s existing `Key::MetaRight` mapping. The
+reversibility test still holds (92 was previously unmapped). Linux/macOS already
+map their right-meta key, so only the Windows table changes.
 
 ---
 

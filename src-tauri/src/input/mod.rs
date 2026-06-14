@@ -223,21 +223,26 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
                 return Some(event);
             }
             if let Ok(mut kb) = shared.keyboard.lock() {
+                // macOS delivers Caps Lock as a `FlagsChanged` toggle, so rdev
+                // reports a lone KeyPress when the LED turns on and a lone
+                // KeyRelease when it turns off — one alternating event per
+                // physical tap, tracking the lock state, not the key. Mirroring
+                // that press/release would only hand the host a key-down edge
+                // (what actually toggles its caps) every *other* tap, and leave
+                // Caps Lock held in between. So emit a full down→up tap on every
+                // event: one host toggle per physical press, never left held.
+                // Windows/Linux send normal down/up edges, so Caps Lock there
+                // takes the standard path below (this block is compiled out).
+                #[cfg(target_os = "macos")]
                 if matches!(key, Key::CapsLock) {
-                    // macOS delivers Caps Lock as a `FlagsChanged` toggle, so
-                    // rdev reports a lone KeyPress when the LED turns on and a
-                    // lone KeyRelease when it turns off — one alternating event
-                    // per physical tap, tracking the lock state, not the key.
-                    // Mirroring that press/release would only hand the host a
-                    // key-down edge (what actually toggles its caps) every
-                    // *other* tap, and leave Caps Lock held in between. So emit
-                    // a full down→up tap on every event: one host toggle per
-                    // physical press, and never left held.
                     kb.apply(key, true);
                     shared.send(InputMsg::Keyboard(kb.report()));
                     kb.apply(key, false);
                     shared.send(InputMsg::Keyboard(kb.report()));
-                } else if kb.apply(key, pressed) {
+                    return None;
+                }
+
+                if kb.apply(key, pressed) {
                     shared.send(InputMsg::Keyboard(kb.report()));
                 }
             }
@@ -262,9 +267,11 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
             if !shared.is_locked() || !shared.pass_mouse.load(Ordering::SeqCst) {
                 return Some(event);
             }
-            // On macOS `x`/`y` are relative HID deltas (vendored rdev patch),
-            // valid even though the cursor is frozen by `set_cursor_capture`.
-            let (dx, dy) = (*x as i32, *y as i32);
+            // `relative_delta` normalises per platform: on macOS `x`/`y` are
+            // already HID deltas (vendored rdev patch); on Windows they're the
+            // absolute cursor point, which it converts to a delta + recentres
+            // the frozen cursor (see `platform`).
+            let (dx, dy) = platform::relative_delta(*x, *y);
             if dx != 0 || dy != 0 {
                 shared.send(InputMsg::Move { dx, dy });
             }
@@ -292,11 +299,15 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
 fn track_hotkey(shared: &InputShared, key: &Key, pressed: bool) -> bool {
     match key {
         Key::ControlLeft | Key::ControlRight => shared.ctrl_down.store(pressed, Ordering::SeqCst),
-        // NOTE(windows): when Windows support lands, AltGr synthesises
-        // LeftCtrl+RightAlt, so on an international layout typing AltGr would
-        // trip this exit hotkey. Revisit the combo (or detect synthetic Ctrl)
-        // before shipping the Windows grab path.
+        // The exit hotkey is Ctrl+Alt. On Windows an international-layout AltGr
+        // synthesises LeftCtrl+RightAlt, which would otherwise trip this combo —
+        // so off macOS only the *left* Alt counts and AltGr (`Key::AltGr` = right
+        // Alt) is excluded. The Windows escape hatch is therefore Ctrl+LeftAlt.
+        // macOS has no synthetic-AltGr issue, so either Alt works there.
+        #[cfg(target_os = "macos")]
         Key::Alt | Key::AltGr => shared.alt_down.store(pressed, Ordering::SeqCst),
+        #[cfg(not(target_os = "macos"))]
+        Key::Alt => shared.alt_down.store(pressed, Ordering::SeqCst),
         _ => return false,
     }
     let both = shared.ctrl_down.load(Ordering::SeqCst) && shared.alt_down.load(Ordering::SeqCst);
