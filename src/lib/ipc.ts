@@ -26,6 +26,12 @@ export const commands = {
     invoke<void>("set_passthrough", { flags }),
   enterLock: () => invoke<void>("enter_lock"),
   exitLock: () => invoke<void>("exit_lock"),
+  /** Whether the OS trusts us to capture global input (macOS Accessibility).
+   *  Pass `prompt: true` to trigger macOS's grant dialog when not yet trusted. */
+  checkAccessibility: (prompt: boolean) =>
+    invoke<boolean>("check_accessibility", { prompt }),
+  openAccessibilitySettings: () =>
+    invoke<void>("open_accessibility_settings"),
   debugSendKeyboard: (report: number[]) =>
     invoke<void>("debug_send_keyboard", { report }),
   debugSendMouse: (report: number[]) =>

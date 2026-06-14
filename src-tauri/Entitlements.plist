@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened-runtime entitlements for the notarized release build (plan §5).
+    Only resources the hardened runtime actually gates are listed here:
+
+    - Bluetooth: CoreBluetooth (btleplug) access to the EmulStick dongle.
+    - Camera:    the UVC HDMI capture feed read via getUserMedia (M4).
+
+    NOT listed — and intentionally so:
+    - Accessibility / global input hooks (CGEventTap) are governed by TCC, not
+      by an entitlement; the hardened runtime does not block them.
+    - JIT / unsigned-executable-memory: WKWebView runs JS in a separate,
+      system-entitled WebContent process, so the host app needs no JIT
+      entitlement. Add com.apple.security.cs.allow-jit only if notarization or
+      the webview later require it.
+  -->
+  <key>com.apple.security.device.bluetooth</key>
+  <true/>
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
+</plist>

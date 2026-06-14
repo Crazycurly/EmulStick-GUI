@@ -316,12 +316,16 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
                 let Some(msg) = msg else { break };
                 match msg {
                     InputMsg::Keyboard(report) => {
-                        write_keyboard(&app, &report).await;
+                        if !write_keyboard(&app, &report).await {
+                            reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
+                        }
                     }
                     InputMsg::Buttons(mask) => {
                         buttons = mask;
                         // Latency-sensitive: flush now, carrying pending motion.
-                        flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await;
+                        if !flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
+                            reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
+                        }
                     }
                     InputMsg::Move { dx, dy } => {
                         acc_dx += dx;
@@ -338,8 +342,9 @@ async fn writer_loop(app: AppHandle, mut rx: UnboundedReceiver<InputMsg>) {
             _ = interval.tick() => {
                 // A sub-divisor wheel remainder alone isn't worth a packet; it
                 // carries until it reaches a full tick or motion flushes.
-                if acc_dx != 0 || acc_dy != 0 || acc_wheel.abs() >= SCROLL_DIVISOR {
-                    flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await;
+                let pending = acc_dx != 0 || acc_dy != 0 || acc_wheel.abs() >= SCROLL_DIVISOR;
+                if pending && !flush_mouse(&app, buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel).await {
+                    reset_input_state(&app, &mut buttons, &mut acc_dx, &mut acc_dy, &mut acc_wheel);
                 }
             }
         }
@@ -392,40 +397,103 @@ pub fn refresh_cursor_capture(shared: &InputShared, mouse: bool) {
     }
 }
 
+/// Unconditionally release relative-mouse capture (unfreeze + show the cursor).
+/// Idempotent and safe to call even if capture was never enabled. Used on app
+/// exit and panic so the operator's cursor is never left frozen if the app dies
+/// while locked (plan §8).
+pub fn release_cursor_capture() {
+    platform::set_cursor_capture(false);
+}
+
+/// Whether the OS trusts this process to capture global input (macOS
+/// Accessibility); always true elsewhere. See [`platform::accessibility_trusted`].
+pub fn accessibility_trusted(prompt: bool) -> bool {
+    platform::accessibility_trusted(prompt)
+}
+
+/// Emergency lock release for an **unexpected link drop** (plan §4.2/§8). Makes
+/// the grab transparent and unfreezes the cursor *immediately*, synchronously,
+/// without routing through the writer task — which may be blocked on the BLE
+/// mutex held by the reconnecting `connect()`. The operator must never stay
+/// trapped just because the dongle vanished.
+///
+/// No BLE release-all is sent (the link is already gone); the next successful
+/// [`crate::ble::BleManager::connect`] sends release-all anyway. Caller emits
+/// the `lock_state(false)` IPC event.
+pub fn emergency_unlock(shared: &InputShared) {
+    shared.lock_active.store(false, Ordering::SeqCst);
+    if let Ok(mut kb) = shared.keyboard.lock() {
+        kb.reset();
+    }
+    shared.buttons.store(0, Ordering::SeqCst);
+    // Re-arm the Ctrl+Alt latch so the next combo is a clean rising edge.
+    shared.hotkey_engaged.store(false, Ordering::SeqCst);
+    platform::set_cursor_capture(false);
+}
+
+/// Flush coalesced motion/wheel as F803 packets. Returns `false` if any GATT
+/// write failed (so the caller can drop to a safe state, plan §9).
 async fn flush_mouse(
     app: &AppHandle,
     buttons: u8,
     acc_dx: &mut i32,
     acc_dy: &mut i32,
     acc_wheel: &mut i32,
-) {
+) -> bool {
     // Throttle scroll: one tick per SCROLL_DIVISOR line-deltas, carrying the
     // remainder so slow scrolls aren't lost and fast ones don't race.
     let wheel = *acc_wheel / SCROLL_DIVISOR;
     *acc_wheel -= wheel * SCROLL_DIVISOR;
+    let mut ok = true;
     for packet in mouse::split_reports(buttons, *acc_dx, *acc_dy, wheel) {
-        write_mouse(app, &packet).await;
+        ok &= write_mouse(app, &packet).await;
     }
     *acc_dx = 0;
     *acc_dy = 0;
+    ok
 }
 
-async fn write_keyboard(app: &AppHandle, report: &[u8]) {
-    let _ = app
-        .state::<AppState>()
+/// Write a keyboard report; returns `false` if the GATT write failed.
+async fn write_keyboard(app: &AppHandle, report: &[u8]) -> bool {
+    app.state::<AppState>()
         .ble
         .lock()
         .await
         .write_keyboard(report)
-        .await;
+        .await
+        .is_ok()
 }
 
-async fn write_mouse(app: &AppHandle, report: &[u8]) {
-    let _ = app
-        .state::<AppState>()
+/// Write a mouse report; returns `false` if the GATT write failed.
+async fn write_mouse(app: &AppHandle, report: &[u8]) -> bool {
+    app.state::<AppState>()
         .ble
         .lock()
         .await
         .write_mouse(report)
-        .await;
+        .await
+        .is_ok()
+}
+
+/// Drop to a safe logical state after a GATT write fails (plan §9): forget all
+/// held keys/buttons and pending motion so no phantom press survives the
+/// failure. The host itself is cleared by the release-all sent on the next
+/// (re)connect ([`crate::ble::BleManager::connect`]); the link is down now, so
+/// we can only fix our own model here.
+fn reset_input_state(
+    app: &AppHandle,
+    buttons: &mut u8,
+    acc_dx: &mut i32,
+    acc_dy: &mut i32,
+    acc_wheel: &mut i32,
+) {
+    let shared = &app.state::<AppState>().input_shared;
+    if let Ok(mut kb) = shared.keyboard.lock() {
+        kb.reset();
+    }
+    shared.buttons.store(0, Ordering::SeqCst);
+    *buttons = 0;
+    *acc_dx = 0;
+    *acc_dy = 0;
+    *acc_wheel = 0;
 }

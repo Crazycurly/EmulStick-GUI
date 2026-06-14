@@ -2,34 +2,44 @@
   import { onMount, onDestroy } from "svelte";
 
   // `onpick` fires when the operator clicks the screen (to grab input).
-  let { onpick }: { onpick?: () => void } = $props();
+  // `devices` / `selectedId` are bindable so the parent can render the capture
+  // source picker inside its toolbar (avoids an overlay that collides with the
+  // bar). VideoFeed still owns the actual MediaStream lifecycle.
+  let {
+    onpick,
+    devices = $bindable([]),
+    selectedId = $bindable(""),
+  }: {
+    onpick?: () => void;
+    devices?: MediaDeviceInfo[];
+    selectedId?: string;
+  } = $props();
 
   let videoEl: HTMLVideoElement | undefined = $state();
-  let devices = $state<MediaDeviceInfo[]>([]);
-  let selectedId = $state<string>("");
   let error = $state<string | null>(null);
   let stream: MediaStream | null = null;
+  // deviceId currently streaming — guards the $effect against redundant restarts.
+  let activeId = "";
 
   async function startStream() {
     stopStream();
     error = null;
+    const want = selectedId;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: selectedId
-          ? { deviceId: { exact: selectedId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        video: want
+          ? { deviceId: { exact: want }, width: { ideal: 1920 }, height: { ideal: 1080 } }
           : { width: { ideal: 1920 }, height: { ideal: 1080 } },
       });
       if (videoEl) videoEl.srcObject = stream;
       // Labels are only populated once capture permission is granted.
       const all = await navigator.mediaDevices.enumerateDevices();
       devices = all.filter((d) => d.kind === "videoinput");
-      if (!selectedId) {
-        selectedId =
-          stream.getVideoTracks()[0]?.getSettings().deviceId ??
-          devices[0]?.deviceId ??
-          "";
-      }
+      const actual =
+        stream.getVideoTracks()[0]?.getSettings().deviceId ?? want ?? devices[0]?.deviceId ?? "";
+      activeId = actual;
+      if (selectedId !== actual) selectedId = actual;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -41,12 +51,12 @@
     if (videoEl) videoEl.srcObject = null;
   }
 
-  function onDeviceChange(e: Event) {
-    selectedId = (e.currentTarget as HTMLSelectElement).value;
-    startStream();
-  }
+  // Restart when the parent's source picker selects a different device.
+  $effect(() => {
+    if (selectedId && selectedId !== activeId) startStream();
+  });
 
-  onMount(startStream);
+  onMount(() => startStream());
   onDestroy(stopStream);
 </script>
 
@@ -62,19 +72,6 @@
     </div>
   {:else if devices.length === 0}
     <div class="video-msg muted">Waiting for a capture device…</div>
-  {/if}
-
-  {#if devices.length > 1}
-    <select
-      class="source-select"
-      value={selectedId}
-      onchange={onDeviceChange}
-      onclick={(e) => e.stopPropagation()}
-    >
-      {#each devices as d (d.deviceId)}
-        <option value={d.deviceId}>{d.label || "Capture device"}</option>
-      {/each}
-    </select>
   {/if}
 </div>
 
@@ -103,17 +100,5 @@
     text-align: center;
     color: #e6e8ec;
     padding: 24px;
-  }
-  .source-select {
-    position: absolute;
-    top: 10px;
-    right: 12px;
-    background: rgba(20, 22, 28, 0.8);
-    color: #e6e8ec;
-    border: 1px solid #2a2f3a;
-    border-radius: 8px;
-    padding: 4px 8px;
-    font-size: 12px;
-    max-width: 220px;
   }
 </style>

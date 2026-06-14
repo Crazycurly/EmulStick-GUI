@@ -49,3 +49,72 @@ pub fn set_cursor_capture(_capture: bool) {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn set_cursor_capture(_capture: bool) {}
+
+/// Whether this process is trusted for Accessibility — i.e. allowed to install
+/// a `CGEventTap`/`rdev::grab` (plan §5). Without it the global input hook
+/// silently fails, so the UI checks this before entering lock and guides the
+/// operator to grant it.
+///
+/// When `prompt` is true and the process is not yet trusted, macOS shows its
+/// "<app> would like to control this computer" dialog and adds the app to the
+/// Accessibility list — the onboarding entry point.
+#[cfg(target_os = "macos")]
+pub fn accessibility_trusted(prompt: bool) -> bool {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    type CFTypeRef = *const c_void;
+    type CFStringRef = *const c_void;
+    type CFDictionaryRef = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        static kCFBooleanTrue: CFTypeRef;
+        static kCFTypeDictionaryKeyCallBacks: c_void;
+        static kCFTypeDictionaryValueCallBacks: c_void;
+        fn CFDictionaryCreate(
+            allocator: CFTypeRef,
+            keys: *const CFTypeRef,
+            values: *const CFTypeRef,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFDictionaryRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+        // Returns a `Boolean` (unsigned char); `NULL` options == AXIsProcessTrusted().
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
+    }
+
+    unsafe {
+        let options: CFDictionaryRef = if prompt {
+            let key: CFTypeRef = kAXTrustedCheckOptionPrompt;
+            let value: CFTypeRef = kCFBooleanTrue;
+            CFDictionaryCreate(
+                ptr::null(),
+                &key,
+                &value,
+                1,
+                &kCFTypeDictionaryKeyCallBacks,
+                &kCFTypeDictionaryValueCallBacks,
+            )
+        } else {
+            ptr::null()
+        };
+        let trusted = AXIsProcessTrustedWithOptions(options) != 0;
+        if !options.is_null() {
+            CFRelease(options);
+        }
+        trusted
+    }
+}
+
+/// Non-macOS platforms have no equivalent gate (Windows low-level hooks need no
+/// entitlement), so the process is always "trusted" to capture input.
+#[cfg(not(target_os = "macos"))]
+pub fn accessibility_trusted(_prompt: bool) -> bool {
+    true
+}

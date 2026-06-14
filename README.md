@@ -42,4 +42,6 @@ cargo test --manifest-path src-tauri/Cargo.toml   # protocol byte-exact tests
 
 ## macOS permissions
 
-Global input interception needs **System Settings → Privacy & Security → Accessibility** (and possibly **Input Monitoring**) granted to the app. BLE prompts on first use via `NSBluetoothAlwaysUsageDescription`. Unsigned builds lose the Accessibility grant on every update — sign/notarize for stable iteration (plan §5, M5).
+Global input interception needs **System Settings → Privacy & Security → Accessibility** (and possibly **Input Monitoring**) granted to the app. When lock mode is requested without the grant, the app pops macOS's grant dialog and shows an in-app onboarding card with an **Open Settings** shortcut. BLE prompts on first use via `NSBluetoothAlwaysUsageDescription`.
+
+Unsigned builds lose the Accessibility grant on every update. For dev iteration the `cargo run` runner re-signs with a stable identity (see [`scripts/sign-and-run.sh`](scripts/sign-and-run.sh)); for distributable, notarized release builds see [`docs/release.md`](docs/release.md).

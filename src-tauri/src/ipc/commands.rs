@@ -82,6 +82,29 @@ pub async fn exit_lock(app: AppHandle, state: State<'_, AppState>) -> Result<(),
     Ok(())
 }
 
+/// Whether the OS trusts this process to capture global input (macOS
+/// Accessibility, plan §5). Always true on non-macOS. When `prompt` is true and
+/// the process isn't yet trusted, macOS shows its "allow to control" dialog and
+/// adds the app to the Accessibility list — the onboarding entry point.
+#[tauri::command]
+pub fn check_accessibility(prompt: bool) -> bool {
+    crate::input::accessibility_trusted(prompt)
+}
+
+/// Open the macOS Accessibility settings pane so the operator can grant the
+/// permission. No-op on other platforms.
+#[tauri::command]
+pub fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Debug: write a raw 8-byte keyboard report (M1 — validates §6 encoders
 /// against real hardware from the UI).
 #[tauri::command]

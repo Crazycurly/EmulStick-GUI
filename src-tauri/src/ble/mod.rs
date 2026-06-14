@@ -15,11 +15,14 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::StreamExt;
-use tauri::AppHandle;
+// `as _` brings the `state()` extension method into scope without clashing with
+// btleplug's `platform::Manager` imported above.
+use tauri::{AppHandle, Manager as _};
 
 use crate::ipc::events;
 use crate::ipc::{ConnectionState, DeviceInfo, DiscoveredDevice, LedReport};
 use crate::protocol::{uuids, KEYBOARD_RELEASE_ALL, MOUSE_RELEASE_ALL};
+use crate::state::AppState;
 
 /// Substring (case-insensitive) used as a secondary scan filter for devices
 /// that don't advertise the F800 service UUID in their advertisement packet.
@@ -181,6 +184,16 @@ impl BleManager {
             .cloned()
             .ok_or_else(|| "Mouse characteristic (F803) not found".to_string())?;
 
+        // Start every (re)connection from a clean host state: clear any key or
+        // button left stuck if a previous link dropped mid-press (plan §9
+        // safe-state-on-failure — the release we couldn't send then lands now).
+        let _ = peripheral
+            .write(&keyboard, &KEYBOARD_RELEASE_ALL, WriteType::WithoutResponse)
+            .await;
+        let _ = peripheral
+            .write(&mouse, &MOUSE_RELEASE_ALL, WriteType::WithoutResponse)
+            .await;
+
         let info = read_device_info(&peripheral).await;
         spawn_led_listener(app, &peripheral, &keyboard).await;
 
@@ -315,7 +328,17 @@ fn spawn_connection_monitor(
             tracing::trace!(?event, "central event");
             if let CentralEvent::DeviceDisconnected(pid) = event {
                 if pid.to_string() == target {
-                    tracing::info!("device disconnected → reconnecting");
+                    tracing::info!("device disconnected → exiting lock + reconnecting");
+                    // Free the operator FIRST and synchronously: never leave a
+                    // frozen cursor / grabbed keyboard because the dongle
+                    // vanished mid-lock (plan §4.2/§8). Done here — not via the
+                    // writer task, which may be blocked on the BLE mutex held by
+                    // the reconnecting connect(). Exiting lock also makes the
+                    // grab transparent, so it stops flooding the writer and the
+                    // reconnect can actually make progress.
+                    let state = app.state::<AppState>();
+                    crate::input::emergency_unlock(&state.input_shared);
+                    events::lock_state(&app, false);
                     events::connection_state(&app, ConnectionState::Disconnected);
                     break;
                 }

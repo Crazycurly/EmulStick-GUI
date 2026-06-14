@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import { load, type Store } from "@tauri-apps/plugin-store";
@@ -27,12 +28,32 @@
   let locked = $state(false);
   let scanning = $state(false);
   let lastError = $state<string | null>(null);
+  let needsAccessibility = $state(false);
   let reconnecting = $state(false);
   let savedDevice = $state<SavedDevice | null>(null);
   let view = $state<"compact" | "kvm">("compact");
 
+  // HDMI capture source list/selection — owned here so the KVM toolbar can
+  // render the picker; VideoFeed drives the actual stream via these binds.
+  let videoDevices = $state<MediaDeviceInfo[]>([]);
+  let videoSelectedId = $state("");
+
+  // While grabbed in screen mode the toolbar hides for a clean view; a brief
+  // "Ctrl+Alt to release" reminder fades in on grab so the exit is never hidden.
+  let showReleaseHint = $state(false);
+  // The toolbar lingers briefly after grabbing, then slides away (not abruptly).
+  let barHidden = $state(false);
+
   const connected = $derived(connection === "Connected");
   const deviceName = $derived(savedDevice?.name ?? info?.model ?? "EmulStick");
+  // Locking with neither channel enabled captures nothing — block it. (Exiting
+  // lock must always stay allowed, so this only gates *entering*.)
+  const canGrab = $derived(passthrough.keyboard || passthrough.mouse);
+
+  // The lock/escape hotkey is Ctrl+Alt; on a Mac keyboard those keys are
+  // labelled Control + Option, so show platform-native names.
+  const isMac = navigator.userAgent.includes("Mac");
+  const hotkey = isMac ? "Control+Option" : "Ctrl+Alt";
 
   let store: Store | null = null;
   let intentional = false;
@@ -56,9 +77,17 @@
         }
         scanning = s === "Scanning";
       }),
-      events.onLockState((active) => (locked = active)),
+      events.onLockState((active) => {
+        locked = active;
+        if (active) needsAccessibility = false;
+      }),
       events.onKeyboardLeds((l) => (leds = l)),
-      events.onError((e) => (lastError = `${e.code}: ${e.message}`)),
+      events.onError((e) => {
+        lastError = `${e.code}: ${e.message}`;
+        // The grab thread couldn't install the hook → almost always a missing
+        // macOS Accessibility grant. Surface the onboarding card (plan §5).
+        if (e.code === "input_grab_failed") needsAccessibility = true;
+      }),
     ];
 
     commands.getPassthrough().then((p) => (passthrough = p));
@@ -136,8 +165,29 @@
     await exitKvm();
   }
 
-  const toggleLock = () =>
-    run(locked ? commands.exitLock : commands.enterLock);
+  // Gate lock entry on the macOS Accessibility grant — without it the global
+  // input hook silently fails (plan §5). `checkAccessibility(true)` also pops
+  // macOS's grant dialog the first time and adds the app to the list.
+  async function beginLock() {
+    const ok = await commands.checkAccessibility(true);
+    if (!ok) {
+      needsAccessibility = true;
+      return;
+    }
+    needsAccessibility = false;
+    await commands.enterLock();
+  }
+
+  const toggleLock = () => run(locked ? commands.exitLock : beginLock);
+
+  const openAxSettings = () => run(commands.openAccessibilitySettings);
+
+  // Re-check after the operator grants the permission in System Settings.
+  async function recheckAccessibility() {
+    const ok = await commands.checkAccessibility(false);
+    needsAccessibility = !ok;
+    if (ok) lastError = null;
+  }
 
   function setFlag(key: keyof PassthroughFlags, value: boolean) {
     passthrough = { ...passthrough, [key]: value };
@@ -203,30 +253,76 @@
 
   // Clicking the screen grabs input (PiKVM-style). Exit via the Ctrl+Alt hotkey.
   function grabFromScreen() {
-    if (!locked) toggleLock();
+    if (!locked && canGrab) toggleLock();
   }
+
+  // On grab: flash the "Ctrl+Alt to release" reminder, and slide the toolbar
+  // away after a short linger (not the instant you grab). On release, both
+  // revert immediately so the bar snaps back.
+  $effect(() => {
+    if (!locked) {
+      showReleaseHint = false;
+      barHidden = false;
+      return;
+    }
+    showReleaseHint = true;
+    const hideHint = setTimeout(() => (showReleaseHint = false), 2600);
+    const hideBar = setTimeout(() => (barHidden = true), 1200);
+    return () => {
+      clearTimeout(hideHint);
+      clearTimeout(hideBar);
+    };
+  });
 </script>
 
 {#if view === "kvm"}
   <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
   <div class="kvm">
-    <VideoFeed onpick={grabFromScreen} />
+    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} />
 
-    <div class="kvm-bar">
-      <button class="ghost" onclick={exitKvm} title="Back to compact">‹ Back</button>
-      <span class="badge" class:connected class:locked class:reconnecting>
-        {locked ? "LOCKED" : reconnecting ? "Reconnecting…" : connection}
+    <div class="kvm-bar" class:hidden={barHidden}>
+      <button class="kvm-btn" onclick={exitKvm} title="Back to compact">‹ Back</button>
+      <span class="kvm-status" class:connected class:locked class:reconnecting>
+        <span class="dot"></span>
+        {locked ? "Locked" : reconnecting ? "Reconnecting…" : connection}
       </span>
+
       <div class="spacer"></div>
-      <button class="chip" class:on={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}>⌨</button>
-      <button class="chip" class:on={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}>🖱</button>
-      <button class="lock-btn small" class:danger={locked} onclick={toggleLock}>
-        {locked ? "Release" : "Grab"}
+
+      {#if videoDevices.length > 1}
+        <select class="kvm-source" bind:value={videoSelectedId} title="HDMI capture source" aria-label="Capture source">
+          {#each videoDevices as d (d.deviceId)}
+            <option value={d.deviceId}>{d.label || "Capture device"}</option>
+          {/each}
+        </select>
+      {/if}
+
+      <button class="kvm-chip" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} title="Toggle keyboard passthrough" onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
+      <button class="kvm-chip" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} title="Toggle mouse passthrough" onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+
+      <button
+        class="kvm-grab"
+        class:locked
+        disabled={!locked && !canGrab}
+        title={!locked && !canGrab ? "Enable Keyboard or Mouse first" : ""}
+        onclick={toggleLock}
+      >
+        {locked ? "Unlock" : "Lock"}
       </button>
     </div>
 
-    {#if !locked}
-      <div class="kvm-hint">Click the screen to capture keyboard &amp; mouse · Ctrl+Alt to release</div>
+    {#if needsAccessibility}
+      <div class="kvm-hint onboard-hint">
+        Accessibility access needed —
+        <button class="link" onclick={openAxSettings}>Open Settings</button>
+        to capture input
+      </div>
+    {:else if !locked && !canGrab}
+      <div class="kvm-hint">Enable Keyboard or Mouse to capture input</div>
+    {:else if !locked}
+      <div class="kvm-hint">Click the screen to lock keyboard &amp; mouse · {hotkey} to unlock</div>
+    {:else if showReleaseHint}
+      <div class="kvm-hint release-hint" transition:fade={{ duration: 400 }}>🔒 {hotkey} to unlock</div>
     {/if}
   </div>
 {:else}
@@ -241,6 +337,21 @@
 
     {#if lastError}
       <p class="error" role="alert">{lastError}</p>
+    {/if}
+
+    {#if needsAccessibility}
+      <section class="card onboard" role="alert">
+        <h2>Accessibility access needed</h2>
+        <p class="muted">
+          To capture keyboard &amp; mouse system-wide, allow <strong>EmulStick</strong>
+          under <strong>System Settings → Privacy &amp; Security → Accessibility</strong>,
+          then relaunch the app.
+        </p>
+        <div class="row onboard-actions">
+          <button onclick={openAxSettings}>Open Settings</button>
+          <button class="secondary" onclick={recheckAccessibility}>Re-check</button>
+        </div>
+      </section>
     {/if}
 
     {#if reconnecting}
@@ -297,22 +408,22 @@
       </section>
 
       <div class="toggles">
-        <button class="chip big" class:on={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}>⌨ Keyboard</button>
-        <button class="chip big" class:on={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}>🖱 Mouse</button>
+        <button class="chip big" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
+        <button class="chip big" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
       </div>
 
-      <button class="lock-btn" class:danger={locked} onclick={toggleLock}>
-        {locked ? "🔒 Exit lock · Ctrl+Alt" : "🔓 Enter lock"}
+      <button
+        class="lock-btn"
+        class:locked
+        disabled={!locked && !canGrab}
+        title={!locked && !canGrab ? "Enable Keyboard or Mouse first" : ""}
+        onclick={toggleLock}
+      >
+        {locked ? `🔒 Exit lock · ${hotkey}` : !canGrab ? "Enable a channel to lock" : "🔓 Enter lock"}
       </button>
 
-      <button class="screen-btn" onclick={enterKvm}>🖥 Open screen</button>
-      <button class="screen-btn disconnect" onclick={disconnect}>
-        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 2.5v9" />
-          <path d="M6.6 6.2a7.5 7.5 0 1 0 10.8 0" />
-        </svg>
-        Disconnect
-      </button>
+      <button class="screen-btn" onclick={enterKvm}>🖥️ Open screen</button>
+      <button class="screen-btn disconnect" onclick={disconnect}>🔌 Disconnect</button>
     {/if}
   </main>
 {/if}
