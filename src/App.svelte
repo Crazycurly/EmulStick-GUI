@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import type { UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+  import { load, type Store } from "@tauri-apps/plugin-store";
   import { commands, events } from "./lib/ipc";
+  import VideoFeed from "./lib/VideoFeed.svelte";
   import type {
     ConnectionState,
     DeviceInfo,
@@ -9,6 +13,8 @@
     LedReport,
     PassthroughFlags,
   } from "./lib/types";
+
+  type SavedDevice = { id: string; name: string | null };
 
   let connection = $state<ConnectionState>("Disconnected");
   let devices = $state<DiscoveredDevice[]>([]);
@@ -22,31 +28,81 @@
   let locked = $state(false);
   let scanning = $state(false);
   let lastError = $state<string | null>(null);
+  let needsAccessibility = $state(false);
+  let reconnecting = $state(false);
+  let savedDevice = $state<SavedDevice | null>(null);
+  let view = $state<"compact" | "kvm">("compact");
+
+  // HDMI capture source list/selection — owned here so the KVM toolbar can
+  // render the picker; VideoFeed drives the actual stream via these binds.
+  let videoDevices = $state<MediaDeviceInfo[]>([]);
+  let videoSelectedId = $state("");
+
+  // While grabbed in screen mode the toolbar hides for a clean view; a brief
+  // "Ctrl+Alt to release" reminder fades in on grab so the exit is never hidden.
+  let showReleaseHint = $state(false);
+  // The toolbar lingers briefly after grabbing, then slides away (not abruptly).
+  let barHidden = $state(false);
 
   const connected = $derived(connection === "Connected");
+  const deviceName = $derived(savedDevice?.name ?? info?.model ?? "EmulStick");
+  // Locking with neither channel enabled captures nothing — block it. (Exiting
+  // lock must always stay allowed, so this only gates *entering*.)
+  const canGrab = $derived(passthrough.keyboard || passthrough.mouse);
+
+  // The lock/escape hotkey is Ctrl+Alt; on a Mac keyboard those keys are
+  // labelled Control + Option, so show platform-native names.
+  const isMac = navigator.userAgent.includes("Mac");
+  const hotkey = isMac ? "Control+Option" : "Ctrl+Alt";
+
+  let store: Store | null = null;
+  let intentional = false;
+  let reconnectToken = 0;
+
+  const COMPACT_W = 400;
+  const KVM = { w: 1280, h: 800 };
+  let mainEl: HTMLElement | undefined = $state();
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   onMount(() => {
     const unlisteners: Promise<UnlistenFn>[] = [
       events.onDevicesChanged((d) => (devices = d)),
       events.onConnectionState((s) => {
         connection = s;
+        if (s === "Connected") reconnecting = false;
         if (s === "Disconnected") {
           info = null;
+          if (!intentional && savedDevice) startReconnect();
         }
         scanning = s === "Scanning";
       }),
-      events.onLockState((active) => (locked = active)),
+      events.onLockState((active) => {
+        locked = active;
+        if (active) needsAccessibility = false;
+      }),
       events.onKeyboardLeds((l) => (leds = l)),
-      events.onError((e) => (lastError = `${e.code}: ${e.message}`)),
+      events.onError((e) => {
+        lastError = `${e.code}: ${e.message}`;
+        // The grab thread couldn't install the hook → almost always a missing
+        // macOS Accessibility grant. Surface the onboarding card (plan §5).
+        if (e.code === "input_grab_failed") needsAccessibility = true;
+      }),
     ];
 
     commands.getPassthrough().then((p) => (passthrough = p));
-    commands.getDeviceInfo().then((i) => {
-      if (i) {
-        info = i;
+
+    (async () => {
+      store = await load("emulstick.json");
+      savedDevice = (await store.get<SavedDevice>("lastDevice")) ?? null;
+      const di = await commands.getDeviceInfo();
+      if (di) {
+        info = di;
         connection = "Connected";
+      } else if (savedDevice) {
+        startReconnect();
       }
-    });
+    })();
 
     return () => {
       for (const u of unlisteners) u.then((fn) => fn());
@@ -65,156 +121,309 @@
   const toggleScan = () =>
     run(scanning ? commands.scanStop : commands.scanStart);
 
-  const connect = (id: string) =>
+  async function attemptConnect(id: string, name: string | null) {
+    info = await commands.connect(id);
+    savedDevice = { id, name };
+    await store?.set("lastDevice", savedDevice);
+    await store?.save();
+    reconnecting = false;
+  }
+
+  const connect = (device: DiscoveredDevice) =>
     run(async () => {
-      info = await commands.connect(id);
+      intentional = false;
+      await attemptConnect(device.id, device.name);
     });
 
-  const disconnect = () => run(commands.disconnect);
+  // Retry the saved device with bounded exponential backoff (plan §9).
+  async function startReconnect() {
+    if (reconnecting) return;
+    reconnecting = true;
+    const token = ++reconnectToken;
+    let delay = 1000;
+    while (reconnectToken === token && savedDevice) {
+      try {
+        await attemptConnect(savedDevice.id, savedDevice.name);
+        return;
+      } catch {
+        if (reconnectToken !== token) return;
+        await sleep(delay);
+        delay = Math.min(delay * 2, 30000);
+      }
+    }
+    reconnecting = false;
+  }
 
-  const toggleLock = () =>
-    run(locked ? commands.exitLock : commands.enterLock);
+  async function disconnect() {
+    intentional = true;
+    reconnectToken++;
+    reconnecting = false;
+    savedDevice = null;
+    await store?.delete("lastDevice");
+    await store?.save();
+    await run(commands.disconnect);
+    await exitKvm();
+  }
 
-  function updatePassthrough(key: keyof PassthroughFlags, value: boolean) {
+  // Gate lock entry on the macOS Accessibility grant — without it the global
+  // input hook silently fails (plan §5). `checkAccessibility(true)` also pops
+  // macOS's grant dialog the first time and adds the app to the list.
+  async function beginLock() {
+    const ok = await commands.checkAccessibility(true);
+    if (!ok) {
+      needsAccessibility = true;
+      return;
+    }
+    needsAccessibility = false;
+    await commands.enterLock();
+  }
+
+  const toggleLock = () => run(locked ? commands.exitLock : beginLock);
+
+  const openAxSettings = () => run(commands.openAccessibilitySettings);
+
+  // Re-check after the operator grants the permission in System Settings.
+  async function recheckAccessibility() {
+    const ok = await commands.checkAccessibility(false);
+    needsAccessibility = !ok;
+    if (ok) lastError = null;
+  }
+
+  function setFlag(key: keyof PassthroughFlags, value: boolean) {
     passthrough = { ...passthrough, [key]: value };
     run(() => commands.setPassthrough(passthrough));
   }
 
-  // ── Debug helpers (M1: validate §6 encoders against real hardware) ──────
-  const tapA = () => run(() => commands.debugTapKey(4)); // usage 4 = "a"
+  // Compact mode auto-fits the window to its content (no blank space) and is
+  // not user-resizable; only KVM mode is a large, resizable window.
+  let fitTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Win+Shift+S then release-all, mirroring docs/protocol.md Example 1.1.
-  const winShiftS = () =>
-    run(async () => {
-      await commands.debugSendKeyboard([0xa0, 0, 0x16, 0, 0, 0, 0, 0]);
-      await commands.debugSendKeyboard([0, 0, 0, 0, 0, 0, 0, 0]);
-    });
+  // Auto-size the compact window to its content. Two-pass: size to the measured
+  // content height, then correct for window chrome using the webview's own
+  // innerHeight (robust whether setSize means inner or outer size).
+  async function fitCompact() {
+    if (view !== "compact" || !mainEl) return;
+    try {
+      const win = getCurrentWindow();
+      const content = mainEl.offsetHeight;
+      await win.setResizable(true);
+      await win.setSize(new LogicalSize(COMPACT_W, content));
+      await new Promise((r) => setTimeout(r, 50));
+      const delta = content - window.innerHeight;
+      if (Math.abs(delta) > 1) {
+        await win.setSize(new LogicalSize(COMPACT_W, content + delta));
+      }
+      await win.setResizable(false);
+    } catch {
+      /* window APIs unavailable outside Tauri */
+    }
+  }
 
-  // Nudge the cursor down-right by (40, 40), then stop.
-  const nudgeMouse = () =>
-    run(async () => {
-      await commands.debugSendMouse([0, 40, 0, 40, 0, 0]);
-      await commands.debugSendMouse([0, 0, 0, 0, 0, 0]);
-    });
+  async function enterKvm() {
+    view = "kvm";
+    try {
+      const win = getCurrentWindow();
+      await win.setResizable(true);
+      await win.setSize(new LogicalSize(KVM.w, KVM.h));
+      await win.center();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function exitKvm() {
+    if (view !== "kvm") return;
+    view = "compact"; // the effect below re-fits the compact window
+  }
+
+  // Re-fit whenever the compact content changes size (info load, errors, view…).
+  $effect(() => {
+    if (!mainEl) return;
+    const schedule = () => {
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(fitCompact, 40);
+    };
+    const ro = new ResizeObserver(schedule);
+    ro.observe(mainEl);
+    return () => {
+      ro.disconnect();
+      clearTimeout(fitTimer);
+    };
+  });
+
+  // Clicking the screen grabs input (PiKVM-style). Exit via the Ctrl+Alt hotkey.
+  function grabFromScreen() {
+    if (!locked && canGrab) toggleLock();
+  }
+
+  // On grab: flash the "Ctrl+Alt to release" reminder, and slide the toolbar
+  // away after a short linger (not the instant you grab). On release, both
+  // revert immediately so the bar snaps back.
+  $effect(() => {
+    if (!locked) {
+      showReleaseHint = false;
+      barHidden = false;
+      return;
+    }
+    showReleaseHint = true;
+    const hideHint = setTimeout(() => (showReleaseHint = false), 2600);
+    const hideBar = setTimeout(() => (barHidden = true), 1200);
+    return () => {
+      clearTimeout(hideHint);
+      clearTimeout(hideBar);
+    };
+  });
 </script>
 
-<main>
-  <header>
-    <h1>EmulStick</h1>
-    <span class="badge" class:connected class:locked>
-      {locked ? "LOCKED · " : ""}{connection}
-    </span>
-  </header>
+{#if view === "kvm"}
+  <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
+  <div class="kvm">
+    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} />
 
-  {#if lastError}
-    <p class="error" role="alert">{lastError}</p>
-  {/if}
+    <div class="kvm-bar" class:hidden={barHidden}>
+      <button class="kvm-btn" onclick={exitKvm} title="Back to compact">‹ Back</button>
+      <span class="kvm-status" class:connected class:locked class:reconnecting>
+        <span class="dot"></span>
+        {locked ? "Locked" : reconnecting ? "Reconnecting…" : connection}
+      </span>
 
-  <section class="card">
-    <div class="row">
-      <h2>Devices</h2>
-      <button onclick={toggleScan}>
-        {scanning ? "Stop scan" : "Scan"}
+      <div class="spacer"></div>
+
+      {#if videoDevices.length > 1}
+        <select class="kvm-source" bind:value={videoSelectedId} title="HDMI capture source" aria-label="Capture source">
+          {#each videoDevices as d (d.deviceId)}
+            <option value={d.deviceId}>{d.label || "Capture device"}</option>
+          {/each}
+        </select>
+      {/if}
+
+      <button class="kvm-chip" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} title="Toggle keyboard passthrough" onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
+      <button class="kvm-chip" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} title="Toggle mouse passthrough" onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+
+      <button
+        class="kvm-grab"
+        class:locked
+        disabled={!locked && !canGrab}
+        title={!locked && !canGrab ? "Enable Keyboard or Mouse first" : ""}
+        onclick={toggleLock}
+      >
+        {locked ? "Unlock" : "Lock"}
       </button>
     </div>
-    {#if devices.length === 0}
-      <p class="muted">
-        {scanning ? "Scanning…" : "No devices. Start a scan."}
-      </p>
-    {:else}
-      <ul class="devices">
-        {#each devices as device (device.id)}
-          <li>
-            <div>
-              <strong>{device.name ?? "Unknown"}</strong>
-              <span class="muted mono">{device.id}</span>
-            </div>
-            <div class="row">
-              {#if device.rssi != null}
-                <span class="muted">{device.rssi} dBm</span>
-              {/if}
-              <button onclick={() => connect(device.id)} disabled={connected}>
-                Connect
-              </button>
-            </div>
-          </li>
-        {/each}
-      </ul>
+
+    {#if needsAccessibility}
+      <div class="kvm-hint onboard-hint">
+        Accessibility access needed —
+        <button class="link" onclick={openAxSettings}>Open Settings</button>
+        to capture input
+      </div>
+    {:else if !locked && !canGrab}
+      <div class="kvm-hint">Enable Keyboard or Mouse to capture input</div>
+    {:else if !locked}
+      <div class="kvm-hint">Click the screen to lock keyboard &amp; mouse · {hotkey} to unlock</div>
+    {:else if showReleaseHint}
+      <div class="kvm-hint release-hint" transition:fade={{ duration: 400 }}>🔒 {hotkey} to unlock</div>
     {/if}
-  </section>
+  </div>
+{:else}
+  <!-- ── Compact mode ─────────────────────────────────────────────────── -->
+  <main class="compact" bind:this={mainEl}>
+    <header>
+      <h1>EmulStick</h1>
+      <span class="badge" class:connected class:locked class:reconnecting>
+        {locked ? "LOCKED · " : ""}{reconnecting ? "Reconnecting…" : connection}
+      </span>
+    </header>
 
-  {#if connected}
-    <section class="card">
-      <div class="row">
-        <h2>Connected device</h2>
-        <button class="secondary" onclick={disconnect}>Disconnect</button>
-      </div>
-      <dl class="info">
-        <dt>Firmware</dt>
-        <dd>{info?.firmware ?? "—"}</dd>
-        <dt>Model</dt>
-        <dd>{info?.model ?? "—"}</dd>
-        <dt>Manufacturer</dt>
-        <dd>{info?.manufacturer ?? "—"}</dd>
-        <dt>System ID</dt>
-        <dd class="mono">{info?.systemId ?? "—"}</dd>
-      </dl>
-      <div class="leds">
-        <span class="led" class:on={leds.num}>Num</span>
-        <span class="led" class:on={leds.caps}>Caps</span>
-        <span class="led" class:on={leds.scroll}>Scroll</span>
-      </div>
-    </section>
+    {#if lastError}
+      <p class="error" role="alert">{lastError}</p>
+    {/if}
 
-    <section class="card">
-      <h2>Passthrough</h2>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.keyboard}
-          onchange={(e) => updatePassthrough("keyboard", e.currentTarget.checked)}
-        />
-        Keyboard
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.mouse}
-          onchange={(e) => updatePassthrough("mouse", e.currentTarget.checked)}
-        />
-        Mouse
-      </label>
-      <label>
-        <input
-          type="checkbox"
-          checked={passthrough.video}
-          onchange={(e) => updatePassthrough("video", e.currentTarget.checked)}
-        />
-        Video
-      </label>
-    </section>
+    {#if needsAccessibility}
+      <section class="card onboard" role="alert">
+        <h2>Accessibility access needed</h2>
+        <p class="muted">
+          To capture keyboard &amp; mouse system-wide, allow <strong>EmulStick</strong>
+          under <strong>System Settings → Privacy &amp; Security → Accessibility</strong>,
+          then relaunch the app.
+        </p>
+        <div class="row onboard-actions">
+          <button onclick={openAxSettings}>Open Settings</button>
+          <button class="secondary" onclick={recheckAccessibility}>Re-check</button>
+        </div>
+      </section>
+    {/if}
 
-    <section class="card">
-      <div class="row">
-        <h2>Lock mode</h2>
-        <button class:danger={locked} onclick={toggleLock}>
-          {locked ? "Exit lock" : "Enter lock"}
-        </button>
+    {#if reconnecting}
+      <div class="card reconnect-banner">
+        <span>Reconnecting to <strong>{deviceName}</strong>…</span>
+        <button class="secondary" onclick={disconnect}>Stop</button>
       </div>
-      <p class="muted">
-        Lock-mode input grabbing arrives in M2. The hotkey will always release
-        the lock so the operator can't get trapped.
-      </p>
-    </section>
+    {/if}
 
-    <section class="card">
-      <h2>Debug · send reports</h2>
-      <p class="muted">Validates the §6 encoders against the dongle.</p>
-      <div class="row wrap">
-        <button onclick={tapA}>Tap “a”</button>
-        <button onclick={winShiftS}>Win+Shift+S</button>
-        <button onclick={nudgeMouse}>Nudge mouse (40,40)</button>
+    {#if !connected && !reconnecting}
+      <section class="card">
+        <div class="row">
+          <h2>Connect a device</h2>
+          <button onclick={toggleScan}>{scanning ? "Stop" : "Scan"}</button>
+        </div>
+        {#if devices.length === 0}
+          <p class="muted">{scanning ? "Scanning…" : "Start a scan to find your EmulStick."}</p>
+        {:else}
+          <ul class="devices">
+            {#each devices as device (device.id)}
+              <li>
+                <div>
+                  <strong>{device.name ?? "Unknown"}</strong>
+                  {#if device.rssi != null}<span class="muted">{device.rssi} dBm</span>{/if}
+                </div>
+                <button onclick={() => connect(device)}>Connect</button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+    {/if}
+
+    {#if connected}
+      <section class="card">
+        <div class="row">
+          <h2>{deviceName}</h2>
+          <div class="leds">
+            <span class="led" class:on={leds.num}>N</span>
+            <span class="led" class:on={leds.caps}>C</span>
+            <span class="led" class:on={leds.scroll}>S</span>
+          </div>
+        </div>
+        <dl class="info">
+          <dt>Firmware</dt>
+          <dd>{info?.firmware ?? "—"}</dd>
+          <dt>Model</dt>
+          <dd>{info?.model ?? "—"}</dd>
+          <dt>Manufacturer</dt>
+          <dd>{info?.manufacturer ?? "—"}</dd>
+          <dt>System ID</dt>
+          <dd class="mono">{info?.systemId ?? "—"}</dd>
+        </dl>
+      </section>
+
+      <div class="toggles">
+        <button class="chip big" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
+        <button class="chip big" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
       </div>
-    </section>
-  {/if}
-</main>
+
+      <button
+        class="lock-btn"
+        class:locked
+        disabled={!locked && !canGrab}
+        title={!locked && !canGrab ? "Enable Keyboard or Mouse first" : ""}
+        onclick={toggleLock}
+      >
+        {locked ? `🔒 Exit lock · ${hotkey}` : !canGrab ? "Enable a channel to lock" : "🔓 Enter lock"}
+      </button>
+
+      <button class="screen-btn" onclick={enterKvm}>🖥️ Open screen</button>
+      <button class="screen-btn disconnect" onclick={disconnect}>🔌 Disconnect</button>
+    {/if}
+  </main>
+{/if}

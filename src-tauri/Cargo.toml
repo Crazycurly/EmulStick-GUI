@@ -33,7 +33,10 @@ uuid = "1"
 
 # OS-level global input hooks. `unstable_grab` enables `rdev::grab`, which can
 # *consume* events (return None) — required to swallow reserved system combos.
-rdev = { version = "0.5", features = ["unstable_grab"] }
+# Vendored with a one-line macOS patch (see vendor/rdev/PATCH.md): upstream
+# computes Event::name via Text Services Manager on every key event, which
+# asserts main-thread and SIGTRAPs when grab runs on a background thread.
+rdev = { path = "../vendor/rdev", features = ["unstable_grab"] }
 
 thiserror = "2"
 tracing = "0.1"

@@ -13,11 +13,11 @@
     "windows": [
       {
         "title": "EmulStick",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
-        "resizable": true,
+        "width": 400,
+        "height": 560,
+        "minWidth": 360,
+        "minHeight": 460,
+        "resizable": false,
         "fullscreen": false
       }
     ],
@@ -36,7 +36,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "Entitlements.plist"
     }
   },
   "plugins": {}

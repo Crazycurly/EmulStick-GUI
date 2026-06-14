@@ -10,16 +10,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use btleplug::api::{
-    Central, Characteristic, Manager as _, Peripheral as _, PeripheralProperties, ScanFilter,
-    WriteType,
+    Central, CentralEvent, Characteristic, Manager as _, Peripheral as _, PeripheralProperties,
+    ScanFilter, WriteType,
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::StreamExt;
-use tauri::AppHandle;
+// `as _` brings the `state()` extension method into scope without clashing with
+// btleplug's `platform::Manager` imported above.
+use tauri::{AppHandle, Manager as _};
 
 use crate::ipc::events;
 use crate::ipc::{ConnectionState, DeviceInfo, DiscoveredDevice, LedReport};
 use crate::protocol::{uuids, KEYBOARD_RELEASE_ALL, MOUSE_RELEASE_ALL};
+use crate::state::AppState;
 
 /// Substring (case-insensitive) used as a secondary scan filter for devices
 /// that don't advertise the F800 service UUID in their advertisement packet.
@@ -45,6 +48,9 @@ pub struct BleManager {
     connected: Option<ConnectedDevice>,
     scan_stop: Option<Arc<AtomicBool>>,
     scan_task: Option<tauri::async_runtime::JoinHandle<()>>,
+    /// Watches the active connection and emits `Disconnected` on an unexpected
+    /// drop (aborted on intentional disconnect so it stays quiet).
+    monitor_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl Default for BleManager {
@@ -61,6 +67,7 @@ impl BleManager {
             connected: None,
             scan_stop: None,
             scan_task: None,
+            monitor_task: None,
         }
     }
 
@@ -148,20 +155,17 @@ impl BleManager {
         }
     }
 
-    /// Connect to a previously-scanned device, locate the F801/F803 channels,
-    /// read Device Info, and subscribe to LED notifications.
+    /// Connect to a device by id, locate the F801/F803 channels, read Device
+    /// Info, subscribe to LED notifications, and start the connection monitor.
+    ///
+    /// Scans briefly if the device isn't already cached, so this doubles as the
+    /// reconnect path (the device may have aged out of the adapter cache).
     pub async fn connect(&mut self, app: &AppHandle, id: &str) -> Result<DeviceInfo, String> {
         let adapter = self.ensure_adapter().await?;
         self.scan_stop().await?;
         events::connection_state(app, ConnectionState::Connecting);
 
-        let peripheral = adapter
-            .peripherals()
-            .await
-            .map_err(err)?
-            .into_iter()
-            .find(|p| p.id().to_string() == id)
-            .ok_or_else(|| "Device not found — scan again".to_string())?;
+        let peripheral = find_or_scan(&adapter, id).await?;
 
         if !peripheral.is_connected().await.map_err(err)? {
             peripheral.connect().await.map_err(err)?;
@@ -180,9 +184,21 @@ impl BleManager {
             .cloned()
             .ok_or_else(|| "Mouse characteristic (F803) not found".to_string())?;
 
+        // Start every (re)connection from a clean host state: clear any key or
+        // button left stuck if a previous link dropped mid-press (plan §9
+        // safe-state-on-failure — the release we couldn't send then lands now).
+        let _ = peripheral
+            .write(&keyboard, &KEYBOARD_RELEASE_ALL, WriteType::WithoutResponse)
+            .await;
+        let _ = peripheral
+            .write(&mouse, &MOUSE_RELEASE_ALL, WriteType::WithoutResponse)
+            .await;
+
         let info = read_device_info(&peripheral).await;
         spawn_led_listener(app, &peripheral, &keyboard).await;
 
+        self.abort_monitor();
+        self.monitor_task = Some(spawn_connection_monitor(app, &adapter, id));
         self.connected = Some(ConnectedDevice {
             peripheral,
             keyboard,
@@ -193,9 +209,17 @@ impl BleManager {
         Ok(info)
     }
 
+    fn abort_monitor(&mut self) {
+        if let Some(task) = self.monitor_task.take() {
+            task.abort();
+        }
+    }
+
     /// Disconnect, first sending the safe all-up reports so nothing is left
     /// stuck pressed on the host (plan §9).
     pub async fn disconnect(&mut self, app: &AppHandle) -> Result<(), String> {
+        // Stop the monitor first so the intentional drop doesn't fire it.
+        self.abort_monitor();
         self.stop_scan_task();
         if let Some(dev) = self.connected.take() {
             let _ = dev
@@ -248,6 +272,79 @@ impl BleManager {
                 .await;
         }
     }
+}
+
+/// Find a peripheral by its opaque id string among those the adapter knows.
+async fn find_peripheral(adapter: &Adapter, id: &str) -> Option<Peripheral> {
+    adapter
+        .peripherals()
+        .await
+        .ok()?
+        .into_iter()
+        .find(|p| p.id().to_string() == id)
+}
+
+/// Locate a device by id, scanning briefly if it isn't already cached (so this
+/// works both for a fresh connect and for reconnecting after a drop).
+async fn find_or_scan(adapter: &Adapter, id: &str) -> Result<Peripheral, String> {
+    if let Some(p) = find_peripheral(adapter, id).await {
+        return Ok(p);
+    }
+    let _ = adapter.start_scan(ScanFilter::default()).await;
+    let mut found = None;
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if let Some(p) = find_peripheral(adapter, id).await {
+            found = Some(p);
+            break;
+        }
+    }
+    let _ = adapter.stop_scan().await;
+    found.ok_or_else(|| "Device not found — is it powered on and in range?".to_string())
+}
+
+/// Watch the adapter's event stream and emit `Disconnected` when our device
+/// drops, then exit. CoreBluetooth's `DeviceDisconnected` is the reliable
+/// signal — polling `is_connected()` does not detect link loss on macOS.
+/// Aborted by [`BleManager::abort_monitor`] on an intentional disconnect.
+fn spawn_connection_monitor(
+    app: &AppHandle,
+    adapter: &Adapter,
+    id: &str,
+) -> tauri::async_runtime::JoinHandle<()> {
+    let app = app.clone();
+    let adapter = adapter.clone();
+    let target = id.to_string();
+    tauri::async_runtime::spawn(async move {
+        let mut stream = match adapter.events().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(?e, "adapter.events() failed; no disconnect detection");
+                return;
+            }
+        };
+        tracing::debug!("connection monitor (event stream) started");
+        while let Some(event) = stream.next().await {
+            tracing::trace!(?event, "central event");
+            if let CentralEvent::DeviceDisconnected(pid) = event {
+                if pid.to_string() == target {
+                    tracing::info!("device disconnected → exiting lock + reconnecting");
+                    // Free the operator FIRST and synchronously: never leave a
+                    // frozen cursor / grabbed keyboard because the dongle
+                    // vanished mid-lock (plan §4.2/§8). Done here — not via the
+                    // writer task, which may be blocked on the BLE mutex held by
+                    // the reconnecting connect(). Exiting lock also makes the
+                    // grab transparent, so it stops flooding the writer and the
+                    // reconnect can actually make progress.
+                    let state = app.state::<AppState>();
+                    crate::input::emergency_unlock(&state.input_shared);
+                    events::lock_state(&app, false);
+                    events::connection_state(&app, ConnectionState::Disconnected);
+                    break;
+                }
+            }
+        }
+    })
 }
 
 /// Keep a device if it advertises the Custom Service, or its name hints at an

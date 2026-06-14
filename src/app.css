@@ -21,74 +21,7 @@
 
 body {
   margin: 0;
-}
-
-main {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 24px 20px 48px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-h1 {
-  font-size: 22px;
-  margin: 0;
-  letter-spacing: 0.5px;
-}
-
-h2 {
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--muted);
-  margin: 0 0 12px;
-}
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 16px;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.row.wrap {
-  flex-wrap: wrap;
-  justify-content: flex-start;
-}
-
-.badge {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--panel-2);
-  color: var(--muted);
-  border: 1px solid var(--border);
-}
-
-.badge.connected {
-  color: var(--green);
-  border-color: var(--green);
-}
-
-.badge.locked {
-  color: var(--amber);
-  border-color: var(--amber);
+  overflow: hidden;
 }
 
 button {
@@ -101,21 +34,17 @@ button {
   font-weight: 600;
   cursor: pointer;
 }
-
 button:hover {
   filter: brightness(1.1);
 }
-
 button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-
 button.secondary {
   background: var(--panel-2);
   border: 1px solid var(--border);
 }
-
 button.danger {
   background: var(--red);
 }
@@ -124,31 +53,141 @@ button.danger {
   color: var(--muted);
   font-size: 13px;
 }
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
+}
+
+/* ── Compact mode ──────────────────────────────────────────────────────── */
+main.compact {
+  padding: 16px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+h1 {
+  font-size: 18px;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin: 0;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.badge.connected {
+  color: var(--green);
+  border-color: var(--green);
+}
+.badge.reconnecting {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.badge.locked {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.row.wrap {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-top: 10px;
 }
 
 .error {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid var(--red);
   color: #fca5a5;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: 8px;
   margin: 0;
+  font-size: 12px;
+}
+
+.reconnect-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   font-size: 13px;
+  border-color: var(--amber);
+}
+
+/* Accessibility-permission onboarding (plan §5) */
+.card.onboard {
+  border-color: var(--amber);
+  background: rgba(245, 158, 11, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.card.onboard h2 {
+  color: var(--amber);
+}
+.card.onboard p {
+  margin: 0;
+}
+.onboard-actions {
+  justify-content: flex-start;
+  margin-top: 4px;
+}
+.kvm-hint.onboard-hint {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.kvm-hint.release-hint {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 ul.devices {
   list-style: none;
-  margin: 0;
+  margin: 12px 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-
 ul.devices li {
   display: flex;
   align-items: center;
@@ -156,58 +195,305 @@ ul.devices li {
   gap: 12px;
   background: var(--panel-2);
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 9px 11px;
 }
-
 ul.devices li div {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
+/* Connected device info */
 dl.info {
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 92px 1fr;
   gap: 6px 12px;
-  margin: 0;
+  margin: 12px 0 0;
   font-size: 13px;
 }
-
 dl.info dt {
   color: var(--muted);
 }
-
 dl.info dd {
   margin: 0;
+  word-break: break-all;
 }
-
 .leds {
   display: flex;
-  gap: 8px;
-  margin-top: 14px;
+  gap: 6px;
 }
-
 .led {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
   font-size: 11px;
-  font-weight: 600;
-  padding: 3px 8px;
+  font-weight: 700;
   border-radius: 6px;
   background: var(--panel-2);
   color: var(--muted);
   border: 1px solid var(--border);
 }
-
 .led.on {
   background: var(--green);
   color: #04210f;
   border-color: var(--green);
 }
 
-label {
+/* Passthrough toggle chips */
+.toggles {
+  display: flex;
+  gap: 10px;
+}
+.chip {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.chip:hover {
+  color: var(--text);
+  border-color: #3a4150;
+}
+.chip.big {
+  padding: 12px;
+  font-size: 14px;
+}
+/* Status dot: dim/hollow when off, a lit green dot when the channel is on. */
+.chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.45;
+  flex: none;
+}
+/* Enabled = lit dot + a faint green lift (not a loud solid block). */
+.chip.on {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.55);
+  color: var(--text);
+}
+.chip.on .dot {
+  background: var(--green);
+  opacity: 1;
+  box-shadow: 0 0 7px var(--green);
+}
+.chip.on:hover {
+  color: var(--text);
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.lock-btn {
+  padding: 14px;
+  font-size: 15px;
+}
+/* Engaged state: a calm amber "active" look (matches the locked badge) rather
+   than an alarming red. */
+.lock-btn.locked {
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+}
+.lock-btn.locked:hover {
+  background: rgba(245, 158, 11, 0.2);
+  filter: none;
+}
+
+.screen-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  padding: 12px;
+  font-size: 14px;
+}
+.screen-btn.disconnect {
+  background: var(--red);
+  border-color: var(--red);
+  color: white;
+}
+
+/* ── KVM mode ──────────────────────────────────────────────────────────── */
+.kvm {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
+.kvm-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 52px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 0;
-  font-size: 14px;
+  padding: 0 12px;
+  background: linear-gradient(rgba(15, 17, 21, 0.9), rgba(15, 17, 21, 0));
+  z-index: 2;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+/* Grabbed → slide the toolbar away for a clean full-screen view (PiKVM-style).
+   Ctrl+Alt releases and brings it back. */
+.kvm-bar.hidden {
+  opacity: 0;
+  transform: translateY(-110%);
+  pointer-events: none;
+}
+.kvm-bar .spacer {
+  flex: 1;
+}
+
+/* Slim translucent controls (shared chrome) */
+.kvm-btn,
+.kvm-status,
+.kvm-chip,
+.kvm-source {
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.kvm-btn {
+  background: rgba(28, 32, 40, 0.72);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 13px;
+}
+.kvm-btn:hover {
+  background: rgba(40, 45, 56, 0.85);
+}
+
+.kvm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: rgba(20, 22, 28, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 13px;
+  white-space: nowrap;
+}
+.kvm-status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.kvm-status.connected {
+  color: var(--green);
+}
+.kvm-status.connected .dot {
+  background: var(--green);
+  box-shadow: 0 0 7px var(--green);
+}
+.kvm-status.reconnecting,
+.kvm-status.locked {
+  color: var(--amber);
+  border-color: var(--amber);
+}
+.kvm-status.reconnecting .dot,
+.kvm-status.locked .dot {
+  background: var(--amber);
+  box-shadow: 0 0 7px var(--amber);
+}
+
+.kvm-source {
+  max-width: 220px;
+  appearance: none;
+  -webkit-appearance: none;
+  /* Custom chevron so it matches the dark glass chrome instead of the native
+     macOS popup-button look. */
+  background-color: rgba(20, 22, 28, 0.6);
+  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='12'%20height='12'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%238b93a1'%20stroke-width='2.5'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='M6%209l6%206%206-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 11px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 28px 7px 11px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
+}
+.kvm-source:hover {
+  border-color: #3a4150;
+}
+.kvm-source option {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.kvm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(20, 22, 28, 0.6);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.kvm-chip:hover {
+  color: var(--text);
+  border-color: #3a4150;
+}
+.kvm-chip .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.5;
+  flex: none;
+}
+.kvm-chip.on {
+  color: var(--text);
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.55);
+}
+.kvm-chip.on .dot {
+  background: var(--green);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--green);
+}
+
+.kvm-grab {
+  padding: 8px 18px;
+  font-size: 13px;
+}
+.kvm-grab.locked {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid var(--amber);
+  color: var(--amber);
+}
+.kvm-grab.locked:hover {
+  background: rgba(245, 158, 11, 0.26);
+  filter: none;
+}
+
+.kvm-hint {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 17, 21, 0.8);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  z-index: 2;
 }

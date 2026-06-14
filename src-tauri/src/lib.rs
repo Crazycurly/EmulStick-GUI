@@ -8,6 +8,8 @@ pub mod ipc;
 pub mod protocol;
 pub mod state;
 
+use tauri::{Manager, RunEvent};
+
 use ble::BleManager;
 use state::AppState;
 
@@ -20,7 +22,15 @@ pub fn run() {
         )
         .init();
 
-    tauri::Builder::default()
+    // A panic anywhere — including on the grab thread — must never leave the
+    // operator's cursor frozen/hidden (plan §8). Restore it before unwinding.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        input::release_cursor_capture();
+        default_hook(info);
+    }));
+
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .manage(AppState::new(BleManager::new()))
         .invoke_handler(tauri::generate_handler![
@@ -33,10 +43,25 @@ pub fn run() {
             ipc::commands::set_passthrough,
             ipc::commands::enter_lock,
             ipc::commands::exit_lock,
+            ipc::commands::check_accessibility,
+            ipc::commands::open_accessibility_settings,
             ipc::commands::debug_send_keyboard,
             ipc::commands::debug_send_mouse,
             ipc::commands::debug_tap_key,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        // On exit, guarantee the operator's machine is never left captured
+        // (plan §8/§9): unfreeze the cursor and release all keys/buttons so
+        // nothing is stuck pressed on the host.
+        if let RunEvent::ExitRequested { .. } = event {
+            input::release_cursor_capture();
+            let state = app_handle.state::<AppState>();
+            tauri::async_runtime::block_on(async {
+                state.ble.lock().await.release_all().await;
+            });
+        }
+    });
 }
