@@ -186,15 +186,17 @@ impl InputController {
                 if let Err(e) = result {
                     // Re-arm so a later lock-enter retries the install.
                     shared.grab_active.store(false, Ordering::SeqCst);
-                    tracing::error!(?e, "rdev::grab failed (Accessibility permission?)");
+                    tracing::error!(?e, "rdev::grab failed to install the global input hook");
+                    #[cfg(target_os = "macos")]
+                    let detail = "On macOS, enable this app under System Settings → \
+                                  Privacy & Security → Accessibility, then relaunch.";
+                    #[cfg(not(target_os = "macos"))]
+                    let detail = "Another low-level input hook or security/anti-cheat \
+                                  software may be blocking it; close it and relaunch.";
                     events::error(
                         &app,
                         "input_grab_failed",
-                        format!(
-                            "Could not install the global input hook ({e:?}). On macOS, \
-                             enable this app under System Settings → Privacy & Security → \
-                             Accessibility, then relaunch."
-                        ),
+                        format!("Could not install the global input hook ({e:?}). {detail}"),
                     );
                 }
             })
@@ -207,6 +209,14 @@ impl InputController {
 /// Returns `Some(event)` to pass the event through to the operator OS, or
 /// `None` to consume it (so reserved combos like `Cmd+Tab` don't fire locally).
 fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
+    // One-time confirmation (dev builds only) that the OS actually delivers
+    // events to our grab callback — the definitive check that the global hook is
+    // live. If you never see this line after typing, the hook isn't firing.
+    #[cfg(debug_assertions)]
+    {
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| tracing::info!(?event, "grab callback received its first OS event"));
+    }
     match &event.event_type {
         EventType::KeyPress(key) | EventType::KeyRelease(key) => {
             let pressed = matches!(event.event_type, EventType::KeyPress(_));
@@ -408,6 +418,13 @@ async fn set_lock(
     acc_wheel: &mut i32,
 ) {
     let shared = &state.input_shared;
+    tracing::info!(
+        active,
+        grab_active = shared.grab_active.load(Ordering::SeqCst),
+        pass_keyboard = shared.pass_keyboard.load(Ordering::SeqCst),
+        pass_mouse = shared.pass_mouse.load(Ordering::SeqCst),
+        "lock transition"
+    );
 
     if active {
         shared.lock_active.store(true, Ordering::SeqCst);
