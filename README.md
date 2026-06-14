@@ -11,6 +11,7 @@
 [![Svelte](https://img.shields.io/badge/Svelte-5-ff3e00?style=flat-square&logo=svelte&logoColor=white)](https://svelte.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-000000?style=flat-square&logo=rust&logoColor=white)](https://rustup.rs)
 [![transport](https://img.shields.io/badge/transport-BLE%20HID-6d28d9?style=flat-square)](docs/ble-protocol.md)
+[![release](https://img.shields.io/github/v/release/Crazycurly/EmulStick-GUI?style=flat-square&color=2ea043)](https://github.com/Crazycurly/EmulStick-GUI/releases/latest)
 
 </div>
 
@@ -23,6 +24,19 @@ Operator-side console for the **EmulStick** BLE HID emulator. A native desktop a
 | <img src="docs/screenshots/compact.png" width="300" alt="Compact connected view" /> | <img src="docs/screenshots/kvm.png" width="420" alt="KVM mode with live HDMI feed" /> |
 
 </div>
+
+## Download
+
+**[⬇ Download the latest release](https://github.com/Crazycurly/EmulStick-GUI/releases/latest)** — macOS (Apple Silicon).
+
+Open the `.dmg` and drag **EmulStick** to your Applications folder.
+
+> [!NOTE]
+> The build is code-signed for development but **not notarized**, so macOS Gatekeeper will flag it on first launch. Either right-click the app → **Open** once, or clear the quarantine flag:
+> ```bash
+> xattr -dr com.apple.quarantine /Applications/EmulStick.app
+> ```
+> Then grant **Accessibility** (see [macOS permissions](#macos-permissions)) so input forwarding can work. Prefer to build it yourself? See [Development](#development).
 
 ## Features
 
