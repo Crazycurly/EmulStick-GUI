@@ -15,7 +15,9 @@
 
 </div>
 
-Operator-side console for the **EmulStick** BLE HID emulator. A native desktop app (Tauri 2 + Svelte + Rust) that pairs with a USB-HID dongle over Bluetooth LE and forwards your real keyboard and mouse to a target computer — **including the reserved shortcuts** (`⌘Tab`, `Win`, `Ctrl`+`Alt`+`Del`, `⌘`+`Space`…) that a browser-based tool can never intercept. Pipe the target's HDMI through a USB capture card and you get a full PiKVM-style remote console — no agent installed on the target, which sees only a plain USB keyboard/mouse.
+Operator-side console for the **[EmulStick](https://emulstick.com)** BLE HID emulator — a plug-and-play USB 2.0 dongle that the target sees as a standard USB keyboard/mouse/gamepad while receiving input over Bluetooth LE (no drivers, no pairing). This is a native desktop app (Tauri 2 + Svelte + Rust) that pairs with the dongle and forwards your real keyboard and mouse to a target computer — **including the reserved shortcuts** (`⌘Tab`, `Win`, `Ctrl`+`Alt`+`Del`, `⌘`+`Space`…) that a browser-based tool can never intercept. Pipe the target's HDMI through a USB capture card and you get a full PiKVM-style remote console — no agent installed on the target, which sees only a plain USB keyboard/mouse.
+
+> The EmulStick dongle is a commercial product — see **[emulstick.com](https://emulstick.com)** for the hardware and where to buy. This repository is the desktop operator client for it.
 
 <div align="center">
 
@@ -75,7 +77,7 @@ Milestones **M1–M5 are implemented** (BLE bring-up → input pipeline → pass
 
 - [Rust](https://rustup.rs) (stable) and the platform [Tauri prerequisites](https://tauri.app/start/prerequisites/).
 - Node.js 18+ and npm.
-- An EmulStick BLE HID dongle (plugged into the **target**), and — for video — a UVC HDMI capture card.
+- An [EmulStick](https://emulstick.com) BLE HID dongle (plugged into the **target**) — available from the official store linked there — and, for video, a UVC HDMI capture card.
 
 ## Development
 
