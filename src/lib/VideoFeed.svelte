@@ -28,38 +28,57 @@
     devices = all.filter((d) => d.kind === "videoinput");
   }
 
+  function getStream(deviceId: string): Promise<MediaStream> {
+    return navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: deviceId
+        ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+        : { width: { ideal: 1920 }, height: { ideal: 1080 } },
+    });
+  }
+
   async function startStream() {
     stopStream();
     error = null;
     const want = selectedId;
+    let s: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: want
-          ? { deviceId: { exact: want }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-          : { width: { ideal: 1920 }, height: { ideal: 1080 } },
-      });
-      if (videoEl) videoEl.srcObject = stream;
-      // Surface an unplugged capture device (the track ends) instead of
-      // freezing on the last frame; clearing the selection lets Retry — or a
-      // re-plug via `devicechange` — pick up an available device.
-      const track = stream.getVideoTracks()[0];
-      if (track)
-        track.onended = () => {
-          error = "Capture device disconnected.";
-          stopStream();
-          activeId = "";
-          selectedId = "";
-          refreshDevices();
-        };
-      // Labels are only populated once capture permission is granted.
-      await refreshDevices();
-      const actual = track?.getSettings().deviceId ?? want ?? devices[0]?.deviceId ?? "";
-      activeId = actual;
-      if (selectedId !== actual) selectedId = actual;
+      s = await getStream(want);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      // A persisted/selected device that's no longer present throws here. Fall
+      // back to the default camera once rather than stranding the operator on an
+      // error (e.g. a remembered source that was since unplugged).
+      if (!want) {
+        error = e instanceof Error ? e.message : String(e);
+        return;
+      }
+      selectedId = "";
+      try {
+        s = await getStream("");
+      } catch (e2) {
+        error = e2 instanceof Error ? e2.message : String(e2);
+        return;
+      }
     }
+    stream = s;
+    if (videoEl) videoEl.srcObject = stream;
+    // Surface an unplugged capture device (the track ends) instead of freezing
+    // on the last frame; clearing the selection lets Retry — or a re-plug via
+    // `devicechange` — pick up an available device.
+    const track = stream.getVideoTracks()[0];
+    if (track)
+      track.onended = () => {
+        error = "Capture device disconnected.";
+        stopStream();
+        activeId = "";
+        selectedId = "";
+        refreshDevices();
+      };
+    // Labels are only populated once capture permission is granted.
+    await refreshDevices();
+    const actual = track?.getSettings().deviceId ?? devices[0]?.deviceId ?? "";
+    activeId = actual;
+    if (selectedId !== actual) selectedId = actual;
   }
 
   function stopStream() {
@@ -69,9 +88,18 @@
   }
 
   // Keep the picker in sync with hot-plugged hardware, and auto-recover the
-  // feed if a device reappears after we lost it.
-  function onDeviceChange() {
-    refreshDevices();
+  // feed: restart if we lost the stream entirely, or if the device we were
+  // streaming just disappeared from the list (its `onended` isn't guaranteed to
+  // fire, so don't rely on it alone).
+  async function onDeviceChange() {
+    await refreshDevices();
+    if (activeId && !devices.some((d) => d.deviceId === activeId)) {
+      stopStream();
+      activeId = "";
+      selectedId = "";
+      startStream();
+      return;
+    }
     if (!stream) startStream();
   }
 

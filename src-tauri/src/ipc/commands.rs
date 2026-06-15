@@ -27,9 +27,29 @@ pub async fn connect(
     state: State<'_, AppState>,
     device_id: String,
 ) -> Result<DeviceInfo, String> {
-    let info = state.ble.lock().await.connect(&app, &device_id).await?;
-    *state.last_device_id.lock().await = Some(device_id);
-    Ok(info)
+    // Phase 1 (brief lock): adapter + stop scan + claim a generation token.
+    let (adapter, token) = {
+        let mut mgr = state.ble.lock().await;
+        mgr.begin_connect(&app, &device_id).await?
+    };
+    // Phase 2 (NO manager lock): the slow connect/discover/read. The input
+    // writer and every other command stay responsive throughout.
+    let dev = match crate::ble::establish(&app, &adapter, &device_id).await {
+        Ok(dev) => dev,
+        Err(e) => {
+            // Drop this attempt's in-flight claim (iff still current) so a later
+            // superseded same-device finish_connect doesn't skip cleaning up an
+            // orphaned link, then surface the failure as `Disconnected` so the UI
+            // doesn't stick on "Connecting…" (the reconnect backoff drives retry).
+            state.ble.lock().await.connect_failed(token);
+            events::connection_state(&app, ConnectionState::Disconnected);
+            return Err(e);
+        }
+    };
+    // Phase 3 (brief lock): commit iff this attempt wasn't superseded by a newer
+    // connect or an intervening disconnect.
+    let mut mgr = state.ble.lock().await;
+    mgr.finish_connect(&app, &adapter, dev, token).await
 }
 
 #[tauri::command]
@@ -39,7 +59,9 @@ pub async fn disconnect(app: AppHandle, state: State<'_, AppState>) -> Result<()
 
 #[tauri::command]
 pub async fn get_device_info(state: State<'_, AppState>) -> Result<Option<DeviceInfo>, String> {
-    Ok(state.ble.lock().await.device_info())
+    // Reads the connection handle directly (no BLE-manager lock), so it never
+    // blocks behind an in-flight connect.
+    Ok(state.conn.device_info())
 }
 
 #[tauri::command]
@@ -52,12 +74,12 @@ pub async fn set_passthrough(
     state: State<'_, AppState>,
     flags: PassthroughFlags,
 ) -> Result<(), String> {
-    let prev = {
-        let mut guard = state.passthrough.lock().await;
-        let prev = *guard;
-        *guard = flags;
-        prev
-    };
+    // Hold the guard across the mirror + reaction so a concurrent call (or a
+    // racing enter_lock) can't act on a stale `prev`. Both calls below are
+    // synchronous (no `.await`), so the guard is never held across a yield.
+    let mut guard = state.passthrough.lock().await;
+    let prev = *guard;
+    *guard = flags;
     // Mirror to the grab callback so it gates channels live (plan §4.3).
     state.input_shared.set_passthrough(flags.keyboard, flags.mouse);
     // Refresh relative-mouse capture, and if a channel was switched off while
@@ -72,6 +94,8 @@ pub async fn set_passthrough(
 /// mismatch; a matching OS forwards 1:1.
 #[tauri::command]
 pub async fn set_target_os(state: State<'_, AppState>, mac: bool) -> Result<(), String> {
+    // Changing this while locked releases any held key first (see the function),
+    // so a modifier can't span two mappings and stick.
     state.input_shared.set_target_mac(mac);
     Ok(())
 }
@@ -94,9 +118,9 @@ pub async fn exit_lock(app: AppHandle, state: State<'_, AppState>) -> Result<(),
         // The writer emits lock_state and sends the safe all-up reports.
         state.input_shared.request_lock(false);
     } else {
-        // Pipeline never started — fall back to a direct safe state (plan §9).
+        // Pipeline never started, so nothing was ever grabbed or forwarded —
+        // just confirm the (already-unlocked) state to the UI (plan §9).
         state.set_locked(false);
-        state.ble.lock().await.release_all().await;
         events::lock_state(&app, false);
     }
     Ok(())
@@ -138,7 +162,7 @@ pub async fn debug_send_keyboard(
             report.len()
         ));
     }
-    state.ble.lock().await.write_keyboard(&report).await
+    state.conn.write_keyboard(&report).await
 }
 
 /// Debug: write a raw 6-byte mouse report (M1).
@@ -150,7 +174,7 @@ pub async fn debug_send_mouse(state: State<'_, AppState>, report: Vec<u8>) -> Re
             report.len()
         ));
     }
-    state.ble.lock().await.write_mouse(&report).await
+    state.conn.write_mouse(&report).await
 }
 
 /// Debug: press then release a single HID usage id, so the UI can "type" a key
@@ -158,10 +182,9 @@ pub async fn debug_send_mouse(state: State<'_, AppState>, report: Vec<u8>) -> Re
 #[tauri::command]
 pub async fn debug_tap_key(state: State<'_, AppState>, usage: u8) -> Result<(), String> {
     use crate::protocol::KeyboardState;
-    let ble = state.ble.lock().await;
     let mut kb = KeyboardState::new();
     kb.press_key(usage);
-    ble.write_keyboard(&kb.report()).await?;
+    state.conn.write_keyboard(&kb.report()).await?;
     kb.release_key(usage);
-    ble.write_keyboard(&kb.report()).await
+    state.conn.write_keyboard(&kb.report()).await
 }

@@ -4,6 +4,12 @@
 //! Identity note: a device is keyed by `Peripheral::id().to_string()`, an
 //! opaque per-machine value (BD_ADDR on Windows, an OS-assigned UUID on
 //! macOS). It is **not** a portable MAC address (plan §4.1).
+//!
+//! Locking shape (plan §9): the multi-second connect/reconnect orchestration
+//! holds the [`BleManager`] mutex, but the *active connection handle* lives in a
+//! separately-locked [`ConnHandle`] (a cheap std `RwLock`). The input writer and
+//! the read/debug commands snapshot the handle without `.await`, so a slow
+//! connect can never stall the hot write path or the other commands.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -30,10 +36,17 @@ const NAME_HINT: &str = "emul";
 
 /// Cap on a single GATT connect + service-discovery round (plan §9). Without it
 /// CoreBluetooth can leave `connect()`/`discover_services()` pending forever,
-/// holding the BLE mutex — which blocks the writer task and every command, and
-/// silently defeats the frontend's reconnect backoff (it awaits a call that
+/// silently defeating the frontend's reconnect backoff (it awaits a call that
 /// never returns). On timeout we surface an error so the backoff retries.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cap on a single data-plane GATT write (and the DIS reads). Write-without-
+/// response normally returns once the report is queued to the OS, but a wedged
+/// adapter/link can leave it pending forever — which would park the input writer
+/// indefinitely. On timeout the write returns `Err`, so the writer's safe-state
+/// path (`reset_input_state`) engages instead of hanging (plan §9). Comfortably
+/// above any realistic BLE connection interval.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long a user-initiated scan runs before auto-stopping. A scan keeps the
 /// radio busy and the poller running; if the operator walks away we shouldn't
@@ -48,19 +61,134 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 /// A connected EmulStick: the peripheral plus its located write channels.
-struct ConnectedDevice {
+///
+/// Held as `Arc<ConnectedDevice>` behind a [`ConnHandle`]. All writes are
+/// time-bounded ([`WRITE_TIMEOUT`]) so a stuck link can't hang the caller.
+pub struct ConnectedDevice {
     peripheral: Peripheral,
     keyboard: Characteristic,
     mouse: Characteristic,
     info: DeviceInfo,
 }
 
-/// Owns the BLE adapter and (at most one) active connection. Held behind an
-/// async `Mutex` in [`crate::state::AppState`].
+impl ConnectedDevice {
+    /// Write-without-response, bounded by [`WRITE_TIMEOUT`].
+    async fn timed_write(&self, ch: &Characteristic, report: &[u8]) -> Result<(), String> {
+        tokio::time::timeout(
+            WRITE_TIMEOUT,
+            self.peripheral.write(ch, report, WriteType::WithoutResponse),
+        )
+        .await
+        .map_err(|_| "GATT write timed out".to_string())?
+        .map_err(err)
+    }
+
+    /// Write an 8-byte keyboard report (F801).
+    pub async fn write_keyboard(&self, report: &[u8]) -> Result<(), String> {
+        self.timed_write(&self.keyboard, report).await
+    }
+
+    /// Write a 6-byte mouse report (F803).
+    pub async fn write_mouse(&self, report: &[u8]) -> Result<(), String> {
+        self.timed_write(&self.mouse, report).await
+    }
+
+    /// Best-effort safe state: release all keys and buttons (plan §9). Errors
+    /// are swallowed because this runs on teardown paths.
+    pub async fn write_release_all(&self) {
+        let _ = self.timed_write(&self.keyboard, &KEYBOARD_RELEASE_ALL).await;
+        let _ = self.timed_write(&self.mouse, &MOUSE_RELEASE_ALL).await;
+    }
+}
+
+/// Cheap, shared handle to the active connection. Cloned into both [`AppState`]
+/// and the [`BleManager`]; the input writer and the read/debug commands snapshot
+/// the current [`ConnectedDevice`] via a brief std `RwLock` read (no `.await`),
+/// so they never contend with the `BleManager` mutex during a connect/reconnect.
+///
+/// The critical sections only clone an `Arc` or take an `Option`, so they cannot
+/// panic and the lock can never be poisoned — hence the `expect`s are infallible.
+#[derive(Clone, Default)]
+pub struct ConnHandle(Arc<std::sync::RwLock<Option<Arc<ConnectedDevice>>>>);
+
+impl ConnHandle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Snapshot the current connection (clones an `Arc`; no `.await`).
+    fn current(&self) -> Option<Arc<ConnectedDevice>> {
+        self.0.read().expect("ConnHandle poisoned").clone()
+    }
+
+    /// The committed connection's device id, if any (no `.await`).
+    fn current_id(&self) -> Option<String> {
+        self.0
+            .read()
+            .expect("ConnHandle poisoned")
+            .as_ref()
+            .map(|d| d.peripheral.id().to_string())
+    }
+
+    fn set(&self, dev: ConnectedDevice) {
+        *self.0.write().expect("ConnHandle poisoned") = Some(Arc::new(dev));
+    }
+
+    /// Clear and return the active connection (so the caller can disconnect it).
+    fn take(&self) -> Option<Arc<ConnectedDevice>> {
+        self.0.write().expect("ConnHandle poisoned").take()
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.0.read().expect("ConnHandle poisoned").is_some()
+    }
+
+    pub fn device_info(&self) -> Option<DeviceInfo> {
+        self.current().map(|d| d.info.clone())
+    }
+
+    /// Write an 8-byte keyboard report to the active connection.
+    pub async fn write_keyboard(&self, report: &[u8]) -> Result<(), String> {
+        match self.current() {
+            Some(dev) => dev.write_keyboard(report).await,
+            None => Err("Not connected".to_string()),
+        }
+    }
+
+    /// Write a 6-byte mouse report to the active connection.
+    pub async fn write_mouse(&self, report: &[u8]) -> Result<(), String> {
+        match self.current() {
+            Some(dev) => dev.write_mouse(report).await,
+            None => Err("Not connected".to_string()),
+        }
+    }
+
+    /// Best-effort release-all on the active connection (no-op if disconnected).
+    pub async fn release_all(&self) {
+        if let Some(dev) = self.current() {
+            dev.write_release_all().await;
+        }
+    }
+}
+
+/// Owns the BLE adapter and orchestrates scan/connect/disconnect. The active
+/// connection itself lives in the shared [`ConnHandle`] (`conn`), not here, so
+/// the slow orchestration this struct's mutex guards never blocks data writes.
 pub struct BleManager {
     adapter: Option<Adapter>,
     manager: Option<Manager>,
-    connected: Option<ConnectedDevice>,
+    conn: ConnHandle,
+    /// Bumped on every `begin_connect`/`disconnect` so a slow connect attempt
+    /// whose result arrives after a newer connect (or an intervening disconnect)
+    /// can detect it was superseded and discard itself instead of clobbering the
+    /// current connection.
+    connect_gen: u64,
+    /// Device id the in-flight connect is targeting (set by `begin_connect`,
+    /// cleared by `disconnect`). Lets a superseded attempt tell "another attempt
+    /// wants this same device" from "this device is now unwanted", so it only
+    /// tears down a genuinely stray link (btleplug disconnect is keyed by device
+    /// UUID, so a same-UUID disconnect would kill a concurrent same-device link).
+    connecting_id: Option<String>,
     scan_stop: Option<Arc<AtomicBool>>,
     scan_task: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Watches the active connection and emits `Disconnected` on an unexpected
@@ -68,18 +196,14 @@ pub struct BleManager {
     monitor_task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
-impl Default for BleManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl BleManager {
-    pub fn new() -> Self {
+    pub fn new(conn: ConnHandle) -> Self {
         Self {
             adapter: None,
             manager: None,
-            connected: None,
+            conn,
+            connect_gen: 0,
+            connecting_id: None,
             scan_stop: None,
             scan_task: None,
             monitor_task: None,
@@ -87,25 +211,26 @@ impl BleManager {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.connected.is_some()
+        self.conn.is_connected()
     }
 
     /// Lazily acquire the first system Bluetooth adapter. Kept out of
     /// construction so app startup never blocks on the radio.
     async fn ensure_adapter(&mut self) -> Result<Adapter, String> {
-        if self.adapter.is_none() {
-            let manager = Manager::new().await.map_err(err)?;
-            let adapter = manager
-                .adapters()
-                .await
-                .map_err(err)?
-                .into_iter()
-                .next()
-                .ok_or_else(|| "No Bluetooth adapter found".to_string())?;
-            self.manager = Some(manager);
-            self.adapter = Some(adapter);
+        if let Some(adapter) = &self.adapter {
+            return Ok(adapter.clone());
         }
-        Ok(self.adapter.clone().expect("adapter just set"))
+        let manager = Manager::new().await.map_err(err)?;
+        let adapter = manager
+            .adapters()
+            .await
+            .map_err(err)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No Bluetooth adapter found".to_string())?;
+        self.manager = Some(manager);
+        self.adapter = Some(adapter.clone());
+        Ok(adapter)
     }
 
     /// Start scanning and spawn a poller that emits `devices_changed`.
@@ -179,64 +304,71 @@ impl BleManager {
         }
     }
 
-    /// Connect to a device by id, locate the F801/F803 channels, read Device
-    /// Info, subscribe to LED notifications, and start the connection monitor.
-    ///
-    /// Scans briefly if the device isn't already cached, so this doubles as the
-    /// reconnect path (the device may have aged out of the adapter cache).
-    pub async fn connect(&mut self, app: &AppHandle, id: &str) -> Result<DeviceInfo, String> {
+    /// Phase 1 of a connect (plan §9): acquire the adapter, stop any user scan,
+    /// claim a fresh generation token, and announce `Connecting`. Returns the
+    /// adapter (cloned) + token so the caller can run the slow connect work
+    /// *without* holding this manager's mutex.
+    pub async fn begin_connect(
+        &mut self,
+        app: &AppHandle,
+        id: &str,
+    ) -> Result<(Adapter, u64), String> {
         let adapter = self.ensure_adapter().await?;
         self.scan_stop().await?;
+        self.connect_gen = self.connect_gen.wrapping_add(1);
+        self.connecting_id = Some(id.to_string());
         events::connection_state(app, ConnectionState::Connecting);
+        Ok((adapter, self.connect_gen))
+    }
 
-        let peripheral = find_or_scan(&adapter, id).await?;
-
-        if !peripheral.is_connected().await.map_err(err)? {
-            tokio::time::timeout(CONNECT_TIMEOUT, peripheral.connect())
-                .await
-                .map_err(|_| "Connection attempt timed out".to_string())?
-                .map_err(err)?;
+    /// Phase 3 of a connect: commit the established connection iff this attempt
+    /// wasn't superseded (by a newer connect or an intervening disconnect). On
+    /// supersession the freshly-connected peripheral is dropped cleanly so we
+    /// never leave a stray link or clobber the current connection.
+    pub async fn finish_connect(
+        &mut self,
+        app: &AppHandle,
+        adapter: &Adapter,
+        dev: ConnectedDevice,
+        token: u64,
+    ) -> Result<DeviceInfo, String> {
+        if self.connect_gen != token {
+            // Superseded by a newer connect or an intervening disconnect. Only
+            // tear down the link if no current/committed connection and no newer
+            // in-flight attempt wants this same device — btleplug's disconnect is
+            // keyed by device UUID, so disconnecting a same-UUID superseded handle
+            // would kill the live connection a concurrent same-device attempt just
+            // committed (or is about to). Stray cross-device links are still cleaned.
+            let dev_id = dev.peripheral.id().to_string();
+            let still_wanted = self.conn.current_id().as_deref() == Some(&dev_id)
+                || self.connecting_id.as_deref() == Some(&dev_id);
+            if !still_wanted {
+                let _ = dev.peripheral.disconnect().await;
+            }
+            return Err("Connection superseded".to_string());
         }
-        tokio::time::timeout(CONNECT_TIMEOUT, peripheral.discover_services())
-            .await
-            .map_err(|_| "Service discovery timed out".to_string())?
-            .map_err(err)?;
-
-        let chars = peripheral.characteristics();
-        let keyboard = chars
-            .iter()
-            .find(|c| c.uuid == uuids::KEYBOARD)
-            .cloned()
-            .ok_or_else(|| "Keyboard characteristic (F801) not found".to_string())?;
-        let mouse = chars
-            .iter()
-            .find(|c| c.uuid == uuids::MOUSE)
-            .cloned()
-            .ok_or_else(|| "Mouse characteristic (F803) not found".to_string())?;
-
-        // Start every (re)connection from a clean host state: clear any key or
-        // button left stuck if a previous link dropped mid-press (plan §9
-        // safe-state-on-failure — the release we couldn't send then lands now).
-        let _ = peripheral
-            .write(&keyboard, &KEYBOARD_RELEASE_ALL, WriteType::WithoutResponse)
-            .await;
-        let _ = peripheral
-            .write(&mouse, &MOUSE_RELEASE_ALL, WriteType::WithoutResponse)
-            .await;
-
-        let info = read_device_info(&peripheral).await;
-        spawn_led_listener(app, &peripheral, &keyboard).await;
-
+        let info = dev.info.clone();
+        let id = dev.peripheral.id().to_string();
         self.abort_monitor();
-        self.monitor_task = Some(spawn_connection_monitor(app, &adapter, id));
-        self.connected = Some(ConnectedDevice {
-            peripheral,
-            keyboard,
-            mouse,
-            info: info.clone(),
-        });
+        self.monitor_task = Some(spawn_connection_monitor(app, adapter, &id));
+        self.conn.set(dev);
+        // This attempt resolved: the committed connection's `current_id` now
+        // covers "is this device wanted", so drop the in-flight claim. (We're the
+        // current generation here, so we can't be clobbering a newer attempt.)
+        self.connecting_id = None;
         events::connection_state(app, ConnectionState::Connected);
         Ok(info)
+    }
+
+    /// A connect attempt failed in [`establish`] before reaching
+    /// [`Self::finish_connect`]. Drop its in-flight claim *iff* it's still the
+    /// current generation, so a later superseded same-device attempt doesn't
+    /// mistake this abandoned one for "still wanted" and skip tearing down its
+    /// orphaned link. Token-guarded so it can't clear a newer attempt's claim.
+    pub fn connect_failed(&mut self, token: u64) {
+        if self.connect_gen == token {
+            self.connecting_id = None;
+        }
     }
 
     fn abort_monitor(&mut self) {
@@ -246,20 +378,18 @@ impl BleManager {
     }
 
     /// Disconnect, first sending the safe all-up reports so nothing is left
-    /// stuck pressed on the host (plan §9).
+    /// stuck pressed on the host (plan §9). Bumps the generation so any
+    /// in-flight connect attempt discards itself in `finish_connect`.
     pub async fn disconnect(&mut self, app: &AppHandle) -> Result<(), String> {
+        self.connect_gen = self.connect_gen.wrapping_add(1);
+        // Mark no device as wanted, so a superseded in-flight attempt for the
+        // same device tears its link down instead of leaving it connected.
+        self.connecting_id = None;
         // Stop the monitor first so the intentional drop doesn't fire it.
         self.abort_monitor();
         self.stop_scan_task();
-        if let Some(dev) = self.connected.take() {
-            let _ = dev
-                .peripheral
-                .write(&dev.keyboard, &KEYBOARD_RELEASE_ALL, WriteType::WithoutResponse)
-                .await;
-            let _ = dev
-                .peripheral
-                .write(&dev.mouse, &MOUSE_RELEASE_ALL, WriteType::WithoutResponse)
-                .await;
+        if let Some(dev) = self.conn.take() {
+            dev.write_release_all().await;
             let _ = dev.peripheral.disconnect().await;
         }
         events::connection_state(app, ConnectionState::Disconnected);
@@ -267,41 +397,68 @@ impl BleManager {
     }
 
     pub fn device_info(&self) -> Option<DeviceInfo> {
-        self.connected.as_ref().map(|d| d.info.clone())
+        self.conn.device_info()
     }
+}
 
-    /// Write an 8-byte keyboard report (F801, write-without-response).
-    pub async fn write_keyboard(&self, report: &[u8]) -> Result<(), String> {
-        let dev = self.connected.as_ref().ok_or("Not connected")?;
-        dev.peripheral
-            .write(&dev.keyboard, report, WriteType::WithoutResponse)
+/// Phase 2 of a connect (plan §9): the slow part, run with **no** manager mutex
+/// held. Locates the device (scanning briefly if it isn't cached, so this also
+/// serves reconnect), connects, discovers services, sends a clean-state
+/// release-all, reads Device Info, and subscribes to LED notifications.
+pub async fn establish(
+    app: &AppHandle,
+    adapter: &Adapter,
+    id: &str,
+) -> Result<ConnectedDevice, String> {
+    let peripheral = find_or_scan(adapter, id).await?;
+
+    if !peripheral.is_connected().await.map_err(err)? {
+        tokio::time::timeout(CONNECT_TIMEOUT, peripheral.connect())
             .await
-            .map_err(err)
+            .map_err(|_| "Connection attempt timed out".to_string())?
+            .map_err(err)?;
     }
+    tokio::time::timeout(CONNECT_TIMEOUT, peripheral.discover_services())
+        .await
+        .map_err(|_| "Service discovery timed out".to_string())?
+        .map_err(err)?;
 
-    /// Write a 6-byte mouse report (F803, write-without-response).
-    pub async fn write_mouse(&self, report: &[u8]) -> Result<(), String> {
-        let dev = self.connected.as_ref().ok_or("Not connected")?;
-        dev.peripheral
-            .write(&dev.mouse, report, WriteType::WithoutResponse)
-            .await
-            .map_err(err)
-    }
+    let chars = peripheral.characteristics();
+    let keyboard = chars
+        .iter()
+        .find(|c| c.uuid == uuids::KEYBOARD)
+        .cloned()
+        .ok_or_else(|| "Keyboard characteristic (F801) not found".to_string())?;
+    let mouse = chars
+        .iter()
+        .find(|c| c.uuid == uuids::MOUSE)
+        .cloned()
+        .ok_or_else(|| "Mouse characteristic (F803) not found".to_string())?;
 
-    /// Best-effort safe state: release all keys and buttons (plan §9). Errors
-    /// are swallowed because this runs on teardown paths.
-    pub async fn release_all(&self) {
-        if let Some(dev) = self.connected.as_ref() {
-            let _ = dev
-                .peripheral
-                .write(&dev.keyboard, &KEYBOARD_RELEASE_ALL, WriteType::WithoutResponse)
-                .await;
-            let _ = dev
-                .peripheral
-                .write(&dev.mouse, &MOUSE_RELEASE_ALL, WriteType::WithoutResponse)
-                .await;
-        }
-    }
+    // Start every (re)connection from a clean host state: clear any key or
+    // button left stuck if a previous link dropped mid-press (plan §9
+    // safe-state-on-failure — the release we couldn't send then lands now).
+    let _ = timed_write(&peripheral, &keyboard, &KEYBOARD_RELEASE_ALL).await;
+    let _ = timed_write(&peripheral, &mouse, &MOUSE_RELEASE_ALL).await;
+
+    let info = read_device_info(&peripheral).await;
+    spawn_led_listener(app, &peripheral, &keyboard).await;
+
+    Ok(ConnectedDevice {
+        peripheral,
+        keyboard,
+        mouse,
+        info,
+    })
+}
+
+/// [`WRITE_TIMEOUT`]-bounded write helper for the connect path (before a
+/// `ConnectedDevice` exists). Mirrors [`ConnectedDevice::timed_write`].
+async fn timed_write(p: &Peripheral, ch: &Characteristic, report: &[u8]) -> Result<(), String> {
+    tokio::time::timeout(WRITE_TIMEOUT, p.write(ch, report, WriteType::WithoutResponse))
+        .await
+        .map_err(|_| "GATT write timed out".to_string())?
+        .map_err(err)
 }
 
 /// Find a peripheral by its opaque id string among those the adapter knows.
@@ -361,11 +518,9 @@ fn spawn_connection_monitor(
                     tracing::info!("device disconnected → exiting lock + reconnecting");
                     // Free the operator FIRST and synchronously: never leave a
                     // frozen cursor / grabbed keyboard because the dongle
-                    // vanished mid-lock (plan §4.2/§8). Done here — not via the
-                    // writer task, which may be blocked on the BLE mutex held by
-                    // the reconnecting connect(). Exiting lock also makes the
-                    // grab transparent, so it stops flooding the writer and the
-                    // reconnect can actually make progress.
+                    // vanished mid-lock (plan §4.2/§8). Exiting lock also makes
+                    // the grab transparent, so it stops feeding the writer and
+                    // the frontend-driven reconnect can make progress.
                     let state = app.state::<AppState>();
                     crate::input::emergency_unlock(&state.input_shared);
                     events::lock_state(&app, false);
@@ -391,32 +546,48 @@ fn is_emulstick(props: &PeripheralProperties) -> bool {
 }
 
 /// Read the Device Information Service characteristics, tolerating any that are
-/// missing or unreadable.
+/// missing or unreadable (each read is independently time-bounded).
 async fn read_device_info(p: &Peripheral) -> DeviceInfo {
     let chars = p.characteristics();
     let mut info = DeviceInfo::default();
 
     if let Some(c) = chars.iter().find(|c| c.uuid == uuids::FIRMWARE_REVISION) {
-        if let Ok(bytes) = p.read(c).await {
+        if let Some(bytes) = timed_read(p, c).await {
             info.firmware = Some(clean_string(&bytes));
         }
     }
     if let Some(c) = chars.iter().find(|c| c.uuid == uuids::MODEL_NUMBER) {
-        if let Ok(bytes) = p.read(c).await {
+        if let Some(bytes) = timed_read(p, c).await {
             info.model = Some(clean_string(&bytes));
         }
     }
     if let Some(c) = chars.iter().find(|c| c.uuid == uuids::MANUFACTURER_NAME) {
-        if let Ok(bytes) = p.read(c).await {
+        if let Some(bytes) = timed_read(p, c).await {
             info.manufacturer = Some(clean_string(&bytes));
         }
     }
     if let Some(c) = chars.iter().find(|c| c.uuid == uuids::SYSTEM_ID) {
-        if let Ok(bytes) = p.read(c).await {
+        if let Some(bytes) = timed_read(p, c).await {
             info.system_id = Some(hex_string(&bytes));
         }
     }
     info
+}
+
+/// [`WRITE_TIMEOUT`]-bounded DIS read; logs (rather than swallows silently) the
+/// failure so an all-`None` `DeviceInfo` is diagnosable.
+async fn timed_read(p: &Peripheral, c: &Characteristic) -> Option<Vec<u8>> {
+    match tokio::time::timeout(WRITE_TIMEOUT, p.read(c)).await {
+        Ok(Ok(bytes)) => Some(bytes),
+        Ok(Err(e)) => {
+            tracing::debug!(uuid = %c.uuid, ?e, "device-info read failed");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(uuid = %c.uuid, "device-info read timed out");
+            None
+        }
+    }
 }
 
 /// Subscribe to F801 LED notifications and forward them as `keyboard_leds`

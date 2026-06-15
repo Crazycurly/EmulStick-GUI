@@ -22,7 +22,6 @@
   let passthrough = $state<PassthroughFlags>({
     keyboard: false,
     mouse: false,
-    video: false,
   });
   let leds = $state<LedReport>({ num: false, caps: false, scroll: false });
   // OS of the target system being controlled. The backend swaps Alt↔Win on
@@ -93,6 +92,10 @@
         // such grant (Windows/Linux hooks need no permission) — the macOS card
         // would be misleading, so show the backend's actual reason there.
         if (e.code === "input_grab_failed") {
+          // The global hook isn't installed, so we're not actually capturing —
+          // clear any optimistic "locked" UI (and un-hide the toolbar) so the
+          // operator isn't visually trapped behind a dead exit hotkey.
+          locked = false;
           if (isMac) {
             needsAccessibility = true;
             return;
@@ -129,6 +132,9 @@
       // Restore the target-system OS choice and mirror it to the backend.
       targetMac = (await store.get<boolean>("targetMac")) ?? false;
       await commands.setTargetOs(targetMac);
+      // Restore the last HDMI capture source (VideoFeed falls back to the
+      // default camera if it's no longer present).
+      videoSelectedId = (await store.get<string>("videoSource")) ?? "";
       const di = await commands.getDeviceInfo();
       if (di) {
         info = di;
@@ -156,12 +162,16 @@
     return msg;
   }
 
-  async function run(action: () => Promise<unknown>) {
+  // Returns whether the action succeeded, so callers can persist/revert only on
+  // a backend-accepted change.
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     lastError = null;
     try {
       await action();
+      return true;
     } catch (e) {
       lastError = humanize(String(e));
+      return false;
     }
   }
 
@@ -179,6 +189,9 @@
   const connect = (device: DiscoveredDevice) =>
     run(async () => {
       intentional = false;
+      // Cancel any in-flight reconnect loop so it can't race this connect.
+      reconnectToken++;
+      reconnecting = false;
       await attemptConnect(device.id, device.name);
     });
 
@@ -237,17 +250,26 @@
   }
 
   async function setFlag(key: keyof PassthroughFlags, value: boolean) {
+    const prev = passthrough;
     passthrough = { ...passthrough, [key]: value };
-    await run(() => commands.setPassthrough(passthrough));
-    // Persist so the choice survives a restart (see the restore in onMount).
+    // Revert the optimistic toggle if the backend rejected it, and persist only
+    // a choice the backend actually accepted (see the restore in onMount).
+    if (!(await run(() => commands.setPassthrough(passthrough)))) {
+      passthrough = prev;
+      return;
+    }
     await store?.set("passthrough", passthrough);
     await store?.save();
   }
 
   // Switch the target system's OS (key mapping) and persist the choice.
   async function setTarget(mac: boolean) {
+    const prev = targetMac;
     targetMac = mac;
-    await run(() => commands.setTargetOs(mac));
+    if (!(await run(() => commands.setTargetOs(mac)))) {
+      targetMac = prev;
+      return;
+    }
     await store?.set("targetMac", mac);
     await store?.save();
   }
@@ -309,6 +331,16 @@
     };
   });
 
+  // Persist the HDMI capture source ONLY when the operator explicitly picks one
+  // from the dropdown — not when VideoFeed auto-resolves a fallback device (e.g.
+  // the default camera when the remembered source is unplugged), so the saved
+  // preference survives a missing device instead of being overwritten by it.
+  async function pickVideoSource(id: string) {
+    videoSelectedId = id;
+    await store?.set("videoSource", id);
+    await store?.save();
+  }
+
   // Clicking the screen grabs input (PiKVM-style). Exit via the Ctrl+Alt hotkey.
   function grabFromScreen() {
     if (!locked && canGrab) toggleLock();
@@ -363,7 +395,7 @@
       <div class="spacer"></div>
 
       {#if videoDevices.length > 1}
-        <select class="kvm-source" bind:value={videoSelectedId} title="HDMI capture source" aria-label="Capture source">
+        <select class="kvm-source" value={videoSelectedId} onchange={(e) => pickVideoSource((e.currentTarget as HTMLSelectElement).value)} title="HDMI capture source" aria-label="Capture source">
           {#each videoDevices as d (d.deviceId)}
             <option value={d.deviceId}>{d.label || "Capture device"}</option>
           {/each}

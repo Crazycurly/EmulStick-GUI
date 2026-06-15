@@ -15,6 +15,12 @@ pub const AXIS_MAX: i32 = 2047;
 pub const WHEEL_MIN: i32 = -127;
 pub const WHEEL_MAX: i32 = 127;
 
+// Compile-time guard: these bounds must fit the wire types `encode_report` casts
+// to (`i16` for the axes, `i8` for the wheel), so widening a constant past the
+// field width fails the build instead of silently wrapping at runtime.
+const _: () = assert!(AXIS_MAX <= i16::MAX as i32 && AXIS_MIN >= i16::MIN as i32);
+const _: () = assert!(WHEEL_MAX <= i8::MAX as i32 && WHEEL_MIN >= i8::MIN as i32);
+
 /// Mouse button bit masks for byte 0.
 pub mod button {
     pub const LEFT: u8 = 1 << 0;
@@ -36,11 +42,14 @@ pub fn encode_report(buttons: u8, dx: i32, dy: i32, wheel: i32) -> [u8; MOUSE_RE
     [buttons, x_low, x_high, y_low, y_high, wheel as u8]
 }
 
-/// Split an accumulated delta into one or more reports, **never truncating**:
-/// an axis exceeding ±2047 is emitted across multiple packets so fast flicks
-/// track 1:1 (plan §6.3). Wheel is clamped to ±127 and applied only to the
-/// first packet; buttons are carried on every emitted packet. Always returns at
-/// least one packet, so a button-only or wheel-only change still flushes.
+/// Split an accumulated delta into one or more reports, **never truncating**
+/// the axes: an axis exceeding ±2047 is emitted across multiple packets so fast
+/// flicks track 1:1 (plan §6.3). The wheel is clamped to ±127 here as a safety
+/// net and ridden only on the first packet — the caller is responsible for
+/// pre-clamping it and carrying any remainder forward (see the writer's
+/// `flush_mouse`), so wheel ticks beyond a single packet aren't lost either.
+/// Buttons are carried on every emitted packet. Always returns at least one
+/// packet, so a button-only or wheel-only change still flushes.
 pub fn split_reports(
     buttons: u8,
     mut dx: i32,

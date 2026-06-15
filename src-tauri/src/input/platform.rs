@@ -63,32 +63,59 @@ pub fn relative_delta(x: f64, y: f64) -> (i32, i32) {
 mod win {
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use winapi::shared::minwindef::{FALSE, TRUE};
-    use winapi::um::winuser::{GetSystemMetrics, SetCursorPos, ShowCursor, SM_CXSCREEN, SM_CYSCREEN};
+    use winapi::shared::windef::POINT;
+    use winapi::um::winuser::{
+        GetCursorPos, GetMonitorInfoW, GetSystemMetrics, MonitorFromPoint, SetCursorPos,
+        ShowCursor, MONITORINFO, MONITOR_DEFAULTTONEAREST, SM_CXSCREEN, SM_CYSCREEN,
+    };
 
     /// Whether relative-mouse capture is active. Gates [`super::relative_delta`]
     /// so absolute points are only turned into deltas while we're capturing, and
     /// guards `ShowCursor` so its display counter stays balanced (one hide per
     /// enable, one show per disable) across the many idempotent disable calls.
     static CAPTURED: AtomicBool = AtomicBool::new(false);
-    /// Screen-centre anchor we warp the cursor back to after each move.
+    /// Centre anchor (virtual-desktop coords) we warp the cursor back to after
+    /// each move — the centre of whichever monitor the cursor was on at capture.
     static CENTER_X: AtomicI32 = AtomicI32::new(0);
     static CENTER_Y: AtomicI32 = AtomicI32::new(0);
+
+    /// Centre of the monitor currently under the cursor, in virtual-desktop
+    /// coordinates (so `SetCursorPos` warps correctly on multi-monitor setups).
+    /// Falls back to the primary monitor's centre if the queries fail.
+    unsafe fn monitor_center_under_cursor() -> (i32, i32) {
+        let primary = || (GetSystemMetrics(SM_CXSCREEN) / 2, GetSystemMetrics(SM_CYSCREEN) / 2);
+        let mut pt = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut pt) == 0 {
+            return primary();
+        }
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut mi) == 0 {
+            return primary();
+        }
+        (
+            (mi.rcMonitor.left + mi.rcMonitor.right) / 2,
+            (mi.rcMonitor.top + mi.rcMonitor.bottom) / 2,
+        )
+    }
 
     pub fn set_cursor_capture(capture: bool) {
         unsafe {
             if capture {
+                // Compute + publish the anchor and park the cursor on it BEFORE
+                // flipping CAPTURED, so the grab thread's relative_delta can never
+                // observe CAPTURED=true against a stale (or default-zero) centre
+                // and emit a huge spurious jump.
+                let (cx, cy) = monitor_center_under_cursor();
+                CENTER_X.store(cx, Ordering::SeqCst);
+                CENTER_Y.store(cy, Ordering::SeqCst);
+                SetCursorPos(cx, cy);
                 // Idempotent: a second enable (e.g. a passthrough refresh while
                 // already locked) must not hide the cursor twice.
                 if CAPTURED.swap(true, Ordering::SeqCst) {
                     return;
                 }
-                // Anchor at the primary monitor's centre. Multi-monitor / the
-                // active window's monitor is a future refinement (plan §Windows).
-                let cx = GetSystemMetrics(SM_CXSCREEN) / 2;
-                let cy = GetSystemMetrics(SM_CYSCREEN) / 2;
-                CENTER_X.store(cx, Ordering::SeqCst);
-                CENTER_Y.store(cy, Ordering::SeqCst);
-                SetCursorPos(cx, cy);
                 // Best-effort hide. ShowCursor only reliably hides over our own
                 // process's windows; with the cursor pinned at centre and all
                 // moves consumed this is cosmetic, so the limitation is benign.

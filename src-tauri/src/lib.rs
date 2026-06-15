@@ -8,10 +8,15 @@ pub mod ipc;
 pub mod protocol;
 pub mod state;
 
+use std::time::Duration;
+
 use tauri::{Manager, RunEvent};
 
-use ble::BleManager;
 use state::AppState;
+
+/// Bound on the exit teardown so quitting never hangs on a wedged radio. Sized
+/// with headroom over the two final release-all writes (each ≤ `WRITE_TIMEOUT`).
+const EXIT_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Build and run the Tauri application.
 pub fn run() {
@@ -32,7 +37,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
-        .manage(AppState::new(BleManager::new()))
+        .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             ipc::commands::scan_start,
             ipc::commands::scan_stop,
@@ -56,12 +61,17 @@ pub fn run() {
     app.run(|app_handle, event| {
         // On exit, guarantee the operator's machine is never left captured
         // (plan §8/§9): unfreeze the cursor and release all keys/buttons so
-        // nothing is stuck pressed on the host.
+        // nothing is stuck pressed on the host. Bounded by a timeout so a
+        // wedged BLE link can't hang the quit.
         if let RunEvent::ExitRequested { .. } = event {
             input::release_cursor_capture();
             let state = app_handle.state::<AppState>();
             tauri::async_runtime::block_on(async {
-                state.ble.lock().await.release_all().await;
+                let _ = tokio::time::timeout(
+                    EXIT_TEARDOWN_TIMEOUT,
+                    input::shutdown(&state),
+                )
+                .await;
             });
         }
     });
