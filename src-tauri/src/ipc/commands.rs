@@ -66,10 +66,10 @@ pub async fn set_passthrough(
     Ok(())
 }
 
-/// Select the controlled host's OS for modifier remapping. When `mac` is true the
-/// forwarded keys swap Alt↔Win (Alt→⌘, Win→⌥; Ctrl stays Control) so the
-/// operator's modifiers line up with a Mac host; false (default) forwards 1:1 for
-/// a Windows/Linux host.
+/// Select the **target system**'s OS for modifier remapping. When it differs from
+/// the host this app runs on, forwarded keys swap Alt↔Win (Alt→⌘, Win→⌥; Ctrl
+/// stays Control) so the operator's modifiers line up across the keyboard
+/// mismatch; a matching OS forwards 1:1.
 #[tauri::command]
 pub async fn set_target_os(state: State<'_, AppState>, mac: bool) -> Result<(), String> {
     state.input_shared.set_target_mac(mac);

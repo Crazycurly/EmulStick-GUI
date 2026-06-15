@@ -329,7 +329,7 @@ dl.info dd {
   background: rgba(34, 197, 94, 0.16);
 }
 
-/* Controlled-host OS picker: a small segmented Win/Mac toggle (compact mode). */
+/* Target-system OS picker: a small segmented Win/Mac toggle (compact mode). */
 .target {
   display: flex;
   align-items: center;
@@ -347,12 +347,23 @@ dl.info dd {
   overflow: hidden;
 }
 .seg button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 7px 12px;
   font-size: 13px;
   border: none;
   border-radius: 0;
   background: var(--panel-2);
   color: var(--muted);
+}
+
+/* Inline-SVG OS glyphs (see the `osIcon` snippet) — sized to sit beside the
+   label and tinted by the button's currentColor in both seg and KVM chips. */
+.os-ico {
+  width: 14px;
+  height: 14px;
+  flex: none;
 }
 .seg button:hover {
   color: var(--text);

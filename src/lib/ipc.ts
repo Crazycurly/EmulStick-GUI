@@ -24,7 +24,8 @@ export const commands = {
   getPassthrough: () => invoke<PassthroughFlags>("get_passthrough"),
   setPassthrough: (flags: PassthroughFlags) =>
     invoke<void>("set_passthrough", { flags }),
-  /** Select the controlled host's OS for key mapping (macOS swaps Ctrl↔⌘). */
+  /** Select the target system's OS for key mapping (Alt↔Win swap when it
+   *  differs from the host OS). */
   setTargetOs: (mac: boolean) => invoke<void>("set_target_os", { mac }),
   enterLock: () => invoke<void>("enter_lock"),
   exitLock: () => invoke<void>("exit_lock"),

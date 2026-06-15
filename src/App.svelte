@@ -25,8 +25,9 @@
     video: false,
   });
   let leds = $state<LedReport>({ num: false, caps: false, scroll: false });
-  // Controlled host's OS — when macOS, the backend swaps Ctrl↔⌘ on forwarded
-  // keys so the operator's Ctrl drives Mac shortcuts. Persisted like passthrough.
+  // OS of the target system being controlled. The backend swaps Alt↔Win on
+  // forwarded keys when this differs from the host OS, so modifiers line up
+  // across a Mac/PC keyboard mismatch. Persisted like passthrough.
   let targetMac = $state(false);
   let locked = $state(false);
   let scanning = $state(false);
@@ -125,7 +126,7 @@
       } else {
         passthrough = await commands.getPassthrough();
       }
-      // Restore the controlled-host OS choice and mirror it to the backend.
+      // Restore the target-system OS choice and mirror it to the backend.
       targetMac = (await store.get<boolean>("targetMac")) ?? false;
       await commands.setTargetOs(targetMac);
       const di = await commands.getDeviceInfo();
@@ -243,7 +244,7 @@
     await store?.save();
   }
 
-  // Switch the controlled host's OS (key mapping) and persist the choice.
+  // Switch the target system's OS (key mapping) and persist the choice.
   async function setTarget(mac: boolean) {
     targetMac = mac;
     await run(() => commands.setTargetOs(mac));
@@ -332,6 +333,21 @@
   });
 </script>
 
+<!-- OS glyphs as inline SVG: the 🪟 "window" emoji renders as tofu on Windows
+     itself (and varies elsewhere), so the picker draws crisp currentColor marks
+     that inherit the surrounding text colour. -->
+{#snippet osIcon(mac: boolean)}
+  {#if mac}
+    <svg class="os-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zm3.378-3.066c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/>
+    </svg>
+  {:else}
+    <svg class="os-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z"/>
+    </svg>
+  {/if}
+{/snippet}
+
 {#if view === "kvm"}
   <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
   <div class="kvm">
@@ -356,7 +372,7 @@
 
       <button class="kvm-chip" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} title="Toggle keyboard passthrough" onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
       <button class="kvm-chip" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} title="Toggle mouse passthrough" onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
-      <button class="kvm-chip" title="Controlled host OS — macOS swaps Alt→⌘ and Win→⌥ (Ctrl stays Control)" onclick={() => setTarget(!targetMac)}>{targetMac ? "🍎 macOS" : "🪟 Windows"}</button>
+      <button class="kvm-chip" title="Target system OS — when it differs from this computer, Alt/⌘/Win are remapped so the modifiers line up" onclick={() => setTarget(!targetMac)}>{@render osIcon(targetMac)}{targetMac ? "macOS" : "Windows"}</button>
 
       <button
         class="kvm-grab"
@@ -480,11 +496,11 @@
         <button class="chip big" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
       </div>
 
-      <div class="target" role="group" aria-label="Controlled host OS">
-        <span class="target-label" title="The OS of the machine you're controlling. macOS swaps Alt→⌘ and Win→⌥ (Ctrl stays Control) so modifiers line up.">Controlled host</span>
+      <div class="target" role="group" aria-label="Target system OS">
+        <span class="target-label" title="The OS of the system you're controlling. When it differs from this computer, Alt/⌘/Win are remapped so the modifiers line up.">Target system</span>
         <div class="seg">
-          <button class:sel={!targetMac} aria-pressed={!targetMac} onclick={() => setTarget(false)}>🪟 Windows</button>
-          <button class:sel={targetMac} aria-pressed={targetMac} onclick={() => setTarget(true)}>🍎 macOS</button>
+          <button class:sel={!targetMac} aria-pressed={!targetMac} onclick={() => setTarget(false)}>{@render osIcon(false)}Windows</button>
+          <button class:sel={targetMac} aria-pressed={targetMac} onclick={() => setTarget(true)}>{@render osIcon(true)}macOS</button>
         </div>
       </div>
 

@@ -57,9 +57,10 @@ pub struct InputShared {
     pass_keyboard: AtomicBool,
     pass_mouse: AtomicBool,
 
-    /// When set, the controlled host is macOS: swap Alt↔Win on forwarded keys
-    /// (Alt → ⌘, Win → ⌥; Ctrl stays Control) so the operator's modifiers line up
-    /// with a Mac. See [`remap_for_target`].
+    /// OS of the **target system** being controlled. Forwarded keys swap Alt↔Win
+    /// (Alt → ⌘, Win → ⌥; Ctrl stays Control) when this differs from the host OS,
+    /// so the operator's modifiers line up across a Mac/PC keyboard mismatch.
+    /// See [`remap_for_target`].
     target_mac: AtomicBool,
 
     /// Held keys/modifiers, used to render full keyboard reports.
@@ -119,8 +120,9 @@ impl InputShared {
         self.pass_mouse.store(mouse, Ordering::SeqCst);
     }
 
-    /// Select the controlled host's OS for modifier remapping
-    /// (macOS ⇒ swap Alt↔Win: Alt→⌘, Win→⌥; Ctrl stays Control).
+    /// Select the **target system**'s OS for modifier remapping. The Alt↔Win swap
+    /// (Alt→⌘, Win→⌥; Ctrl stays Control) only kicks in when it differs from the
+    /// host OS — see [`remap_for_target`].
     pub fn set_target_mac(&self, mac: bool) {
         self.target_mac.store(mac, Ordering::SeqCst);
     }
@@ -256,9 +258,10 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
                     return None;
                 }
 
-                // Remap modifiers for the controlled host's OS (Ctrl↔⌘ on Mac)
-                // before forwarding. The exit hotkey was already tested on the
-                // raw key above, so this doesn't affect it.
+                // Remap modifiers so they line up with the target system (Alt↔Win
+                // when the host and target OS differ) before forwarding. The exit
+                // hotkey was already tested on the raw key above, so this doesn't
+                // affect it.
                 let mapped = remap_for_target(key, shared.target_mac.load(Ordering::SeqCst));
                 if kb.apply(&mapped, pressed) {
                     shared.send(InputMsg::Keyboard(kb.report()));
@@ -345,28 +348,34 @@ fn track_hotkey(shared: &InputShared, key: &Key, pressed: bool) -> bool {
     false
 }
 
-/// Remap modifier keys for the controlled host's OS. When it's macOS we swap
-/// **Alt ↔ Win** so the modifiers line up with a Mac keyboard's physical
-/// positions:
-///   * **Alt → Command(⌘)** — the spot where ⌘ sits, so it drives ⌘C/⌘V/⌘Tab/…,
-///   * **Win → Option(⌥)**,
-///   * **Ctrl → Control** — left unchanged (HID Ctrl already lands as Mac Control).
+/// Remap modifier keys so they line up between the operator's keyboard and the
+/// **target system** being controlled. A Mac keyboard's ⌘/⌥ row sits where a
+/// PC's Win/Alt row does, so crossing the two requires swapping **Alt ↔ Win**:
+///   * **Alt → Command(⌘)** / **Win → Option(⌥)** — driving a Mac from a PC,
+///   * the mirror of that (the swap is its own inverse) — driving a PC from a Mac,
+///   * **Ctrl → Control** — always left unchanged.
 ///
-/// The Windows target (default) is the identity. Applied only to *forwarded*
-/// keys — the Ctrl+Alt exit hotkey is detected on the raw key beforehand, so the
-/// escape hatch is unaffected by the swap.
+/// The swap is needed only when the target OS *differs* from the host OS this
+/// build runs on; matching OSes already line up, so it's the identity. Applied
+/// only to *forwarded* keys — the Ctrl+Alt exit hotkey is detected on the raw key
+/// beforehand, so the escape hatch is unaffected by the swap.
 fn remap_for_target(key: &Key, target_mac: bool) -> Key {
-    if !target_mac {
+    remap_for_target_os(key, target_mac, cfg!(target_os = "macos"))
+}
+
+/// Host-OS-aware core of [`remap_for_target`], split out so the swap rule can be
+/// unit-tested independent of the OS the test runner happens to be on.
+fn remap_for_target_os(key: &Key, target_mac: bool, host_mac: bool) -> Key {
+    // Same OS on both ends ⇒ the modifier rows already align ⇒ forward 1:1.
+    if target_mac == host_mac {
         return key.clone();
     }
     match key {
-        // Alt → Command(⌘)
         Key::Alt => Key::MetaLeft,
         Key::AltGr => Key::MetaRight,
-        // Win → Option(⌥)
         Key::MetaLeft => Key::Alt,
         Key::MetaRight => Key::AltGr,
-        // Ctrl is left as-is (→ Mac Control).
+        // Ctrl is left as-is.
         other => other.clone(),
     }
 }
@@ -665,27 +674,32 @@ fn reset_input_state(
 
 #[cfg(test)]
 mod tests {
-    use super::remap_for_target;
+    use super::remap_for_target_os;
     use rdev::Key;
 
+    // Host and target on the same OS ⇒ no remap (PC→PC and Mac→Mac alike).
     #[test]
-    fn windows_target_is_identity() {
+    fn matching_os_is_identity() {
         for k in [Key::ControlLeft, Key::Alt, Key::MetaLeft, Key::AltGr, Key::KeyA] {
-            assert_eq!(remap_for_target(&k, false), k);
+            assert_eq!(remap_for_target_os(&k, false, false), k); // PC host → PC target
+            assert_eq!(remap_for_target_os(&k, true, true), k); //   Mac host → Mac target
         }
     }
 
+    // Crossed host/target swaps Alt↔Win and leaves Ctrl alone. The swap is its
+    // own inverse, so it holds both ways: PC→Mac and Mac→PC.
     #[test]
-    fn mac_target_swaps_alt_and_win_keeps_ctrl() {
-        // Alt → Command(⌘)
-        assert_eq!(remap_for_target(&Key::Alt, true), Key::MetaLeft);
-        assert_eq!(remap_for_target(&Key::AltGr, true), Key::MetaRight);
-        // Win → Option(⌥)
-        assert_eq!(remap_for_target(&Key::MetaLeft, true), Key::Alt);
-        assert_eq!(remap_for_target(&Key::MetaRight, true), Key::AltGr);
-        // Ctrl stays Control; regular keys untouched.
-        assert_eq!(remap_for_target(&Key::ControlLeft, true), Key::ControlLeft);
-        assert_eq!(remap_for_target(&Key::ControlRight, true), Key::ControlRight);
-        assert_eq!(remap_for_target(&Key::KeyC, true), Key::KeyC);
+    fn crossed_os_swaps_alt_and_win_keeps_ctrl() {
+        for &(target_mac, host_mac) in &[(true, false), (false, true)] {
+            // Alt → Command(⌘), Win → Option(⌥)
+            assert_eq!(remap_for_target_os(&Key::Alt, target_mac, host_mac), Key::MetaLeft);
+            assert_eq!(remap_for_target_os(&Key::AltGr, target_mac, host_mac), Key::MetaRight);
+            assert_eq!(remap_for_target_os(&Key::MetaLeft, target_mac, host_mac), Key::Alt);
+            assert_eq!(remap_for_target_os(&Key::MetaRight, target_mac, host_mac), Key::AltGr);
+            // Ctrl stays Control; regular keys untouched.
+            assert_eq!(remap_for_target_os(&Key::ControlLeft, target_mac, host_mac), Key::ControlLeft);
+            assert_eq!(remap_for_target_os(&Key::ControlRight, target_mac, host_mac), Key::ControlRight);
+            assert_eq!(remap_for_target_os(&Key::KeyC, target_mac, host_mac), Key::KeyC);
+        }
     }
 }
