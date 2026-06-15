@@ -329,6 +329,39 @@ dl.info dd {
   background: rgba(34, 197, 94, 0.16);
 }
 
+/* Controlled-host OS picker: a small segmented Win/Mac toggle (compact mode). */
+.target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.target-label {
+  font-size: 13px;
+  color: var(--muted);
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  padding: 7px 12px;
+  font-size: 13px;
+  border: none;
+  border-radius: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.seg button:hover {
+  color: var(--text);
+}
+.seg button.sel {
+  background: rgba(255, 255, 255, 0.09);
+  color: var(--text);
+}
+
 .lock-btn {
   padding: 14px;
   font-size: 15px;

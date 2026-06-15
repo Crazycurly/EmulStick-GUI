@@ -66,6 +66,16 @@ pub async fn set_passthrough(
     Ok(())
 }
 
+/// Select the controlled host's OS for modifier remapping. When `mac` is true the
+/// forwarded keys swap Alt↔Win (Alt→⌘, Win→⌥; Ctrl stays Control) so the
+/// operator's modifiers line up with a Mac host; false (default) forwards 1:1 for
+/// a Windows/Linux host.
+#[tauri::command]
+pub async fn set_target_os(state: State<'_, AppState>, mac: bool) -> Result<(), String> {
+    state.input_shared.set_target_mac(mac);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn enter_lock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Install the grab hook on first use, then route the transition through the

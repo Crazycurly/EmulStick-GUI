@@ -25,6 +25,9 @@
     video: false,
   });
   let leds = $state<LedReport>({ num: false, caps: false, scroll: false });
+  // Controlled host's OS — when macOS, the backend swaps Ctrl↔⌘ on forwarded
+  // keys so the operator's Ctrl drives Mac shortcuts. Persisted like passthrough.
+  let targetMac = $state(false);
   let locked = $state(false);
   let scanning = $state(false);
   let lastError = $state<string | null>(null);
@@ -83,11 +86,17 @@
       }),
       events.onKeyboardLeds((l) => (leds = l)),
       events.onError((e) => {
-        // The grab thread couldn't install the hook → almost always a missing
-        // macOS Accessibility grant. The onboarding card is the user-facing
-        // surface for that, so don't also show a raw error line (plan §5).
+        // The grab thread couldn't install the hook. On macOS that's almost
+        // always a missing Accessibility grant, so route it to the onboarding
+        // card instead of a raw error line (plan §5). Other platforms have no
+        // such grant (Windows/Linux hooks need no permission) — the macOS card
+        // would be misleading, so show the backend's actual reason there.
         if (e.code === "input_grab_failed") {
-          needsAccessibility = true;
+          if (isMac) {
+            needsAccessibility = true;
+            return;
+          }
+          lastError = humanize(e.message);
           return;
         }
         lastError = humanize(e.message);
@@ -116,6 +125,9 @@
       } else {
         passthrough = await commands.getPassthrough();
       }
+      // Restore the controlled-host OS choice and mirror it to the backend.
+      targetMac = (await store.get<boolean>("targetMac")) ?? false;
+      await commands.setTargetOs(targetMac);
       const di = await commands.getDeviceInfo();
       if (di) {
         info = di;
@@ -231,6 +243,14 @@
     await store?.save();
   }
 
+  // Switch the controlled host's OS (key mapping) and persist the choice.
+  async function setTarget(mac: boolean) {
+    targetMac = mac;
+    await run(() => commands.setTargetOs(mac));
+    await store?.set("targetMac", mac);
+    await store?.save();
+  }
+
   // Compact mode auto-fits the window to its content (no blank space) and is
   // not user-resizable; only KVM mode is a large, resizable window.
   let fitTimer: ReturnType<typeof setTimeout> | undefined;
@@ -315,7 +335,7 @@
 {#if view === "kvm"}
   <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
   <div class="kvm">
-    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} />
+    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} {locked} />
 
     <div class="kvm-bar" class:hidden={barHidden}>
       <button class="kvm-btn" onclick={exitKvm} title="Back to compact">‹ Back</button>
@@ -336,6 +356,7 @@
 
       <button class="kvm-chip" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} title="Toggle keyboard passthrough" onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
       <button class="kvm-chip" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} title="Toggle mouse passthrough" onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+      <button class="kvm-chip" title="Controlled host OS — macOS swaps Alt→⌘ and Win→⌥ (Ctrl stays Control)" onclick={() => setTarget(!targetMac)}>{targetMac ? "🍎 macOS" : "🪟 Windows"}</button>
 
       <button
         class="kvm-grab"
@@ -457,6 +478,14 @@
       <div class="toggles">
         <button class="chip big" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
         <button class="chip big" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+      </div>
+
+      <div class="target" role="group" aria-label="Controlled host OS">
+        <span class="target-label" title="The OS of the machine you're controlling. macOS swaps Alt→⌘ and Win→⌥ (Ctrl stays Control) so modifiers line up.">Controlled host</span>
+        <div class="seg">
+          <button class:sel={!targetMac} aria-pressed={!targetMac} onclick={() => setTarget(false)}>🪟 Windows</button>
+          <button class:sel={targetMac} aria-pressed={targetMac} onclick={() => setTarget(true)}>🍎 macOS</button>
+        </div>
       </div>
 
       <button

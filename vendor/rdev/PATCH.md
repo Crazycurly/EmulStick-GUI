@@ -1,7 +1,41 @@
 # Vendored `rdev` 0.5.3 — EmulStick patches
 
 Unmodified copy of [`rdev` 0.5.3](https://crates.io/crates/rdev/0.5.3) except for
-two macOS-only changes (Patches 1–2) and one Windows keycode addition (Patch 3).
+two macOS-only changes (Patches 1–2) and two Windows changes (Patches 3–4).
+
+---
+
+## Patch 4 — Windows: skip `Event::name` resolution on the grab thread (`src/windows/grab.rs`)
+
+### The change
+
+`raw_callback` no longer calls `Keyboard::get_name(lpdata)` for KeyPress events;
+it sets `Event { name: None, .. }`. The `EventType`/`KEYBOARD` imports it needed
+are dropped with it.
+
+### Why
+
+Upstream resolves `Event::name` on **every KeyPress** from inside the
+`WH_KEYBOARD_LL` hook. `get_name` → `set_global_state` calls
+`AttachThreadInput(grab_thread, foreground_thread, TRUE)` followed by
+`GetKeyboardState` + `ToUnicodeEx` against the foreground window's thread. Doing
+that synchronously inside a low-level keyboard hook routinely exceeds Windows'
+`LowLevelHooksTimeout` (~300 ms), so the OS **silently stops dispatching the
+keyboard hook**. Symptom: keystrokes bypass `grab` entirely (the host keeps
+typing, reserved combos and the Ctrl+Alt exit hotkey never fire) while the
+**mouse** hook — which never computes a name (`raw_callback`'s `_ => None`) —
+keeps working. That keyboard-only failure is the giveaway.
+
+EmulStick maps the `rdev::Key` enum (`Event::event_type`) via `protocol::keymap`
+and **never reads `Event::name`**, so dropping the name computation is
+behaviourally invisible to us and keeps the keyboard hook alive. This is the
+exact Windows analogue of Patch 1 (macOS skips the Text Services Manager name
+lookup on the grab thread for the same reason).
+
+### Upgrading
+
+If bumping `rdev`, re-apply (or drop the vendor entirely if a future release
+runs name resolution off the hook callback / lets you disable it).
 
 ---
 

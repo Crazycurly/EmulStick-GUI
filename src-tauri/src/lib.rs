@@ -41,6 +41,7 @@ pub fn run() {
             ipc::commands::get_device_info,
             ipc::commands::get_passthrough,
             ipc::commands::set_passthrough,
+            ipc::commands::set_target_os,
             ipc::commands::enter_lock,
             ipc::commands::exit_lock,
             ipc::commands::check_accessibility,

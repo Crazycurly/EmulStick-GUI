@@ -7,10 +7,12 @@
   // bar). VideoFeed still owns the actual MediaStream lifecycle.
   let {
     onpick,
+    locked = false,
     devices = $bindable([]),
     selectedId = $bindable(""),
   }: {
     onpick?: () => void;
+    locked?: boolean;
     devices?: MediaDeviceInfo[];
     selectedId?: string;
   } = $props();
@@ -88,7 +90,7 @@
   });
 </script>
 
-<div class="video-wrap" onclick={onpick} role="presentation">
+<div class="video-wrap" class:locked onclick={onpick} role="presentation">
   <!-- svelte-ignore a11y_media_has_caption -->
   <video bind:this={videoEl} autoplay playsinline muted></video>
 
@@ -110,6 +112,12 @@
     background: #000;
     overflow: hidden;
     cursor: pointer;
+  }
+  /* While grabbed the OS cursor is frozen at screen-centre over the video; hide
+     it (and any child's cursor) so the operator sees only the remote pointer. */
+  .video-wrap.locked,
+  .video-wrap.locked :global(*) {
+    cursor: none;
   }
   video {
     width: 100%;

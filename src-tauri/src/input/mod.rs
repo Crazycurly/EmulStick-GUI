@@ -57,6 +57,11 @@ pub struct InputShared {
     pass_keyboard: AtomicBool,
     pass_mouse: AtomicBool,
 
+    /// When set, the controlled host is macOS: swap Alt↔Win on forwarded keys
+    /// (Alt → ⌘, Win → ⌥; Ctrl stays Control) so the operator's modifiers line up
+    /// with a Mac. See [`remap_for_target`].
+    target_mac: AtomicBool,
+
     /// Held keys/modifiers, used to render full keyboard reports.
     keyboard: Mutex<KeyboardState>,
     /// Current mouse button bitmask.
@@ -83,6 +88,7 @@ impl InputShared {
             lock_active: AtomicBool::new(false),
             pass_keyboard: AtomicBool::new(false),
             pass_mouse: AtomicBool::new(false),
+            target_mac: AtomicBool::new(false),
             keyboard: Mutex::new(KeyboardState::new()),
             buttons: AtomicU8::new(0),
             ctrl_down: AtomicBool::new(false),
@@ -111,6 +117,12 @@ impl InputShared {
     pub fn set_passthrough(&self, keyboard: bool, mouse: bool) {
         self.pass_keyboard.store(keyboard, Ordering::SeqCst);
         self.pass_mouse.store(mouse, Ordering::SeqCst);
+    }
+
+    /// Select the controlled host's OS for modifier remapping
+    /// (macOS ⇒ swap Alt↔Win: Alt→⌘, Win→⌥; Ctrl stays Control).
+    pub fn set_target_mac(&self, mac: bool) {
+        self.target_mac.store(mac, Ordering::SeqCst);
     }
 
     /// Request a lock-mode transition. No-op if the pipeline never started.
@@ -209,14 +221,6 @@ impl InputController {
 /// Returns `Some(event)` to pass the event through to the operator OS, or
 /// `None` to consume it (so reserved combos like `Cmd+Tab` don't fire locally).
 fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
-    // One-time confirmation (dev builds only) that the OS actually delivers
-    // events to our grab callback — the definitive check that the global hook is
-    // live. If you never see this line after typing, the hook isn't firing.
-    #[cfg(debug_assertions)]
-    {
-        static FIRST: std::sync::Once = std::sync::Once::new();
-        FIRST.call_once(|| tracing::info!(?event, "grab callback received its first OS event"));
-    }
     match &event.event_type {
         EventType::KeyPress(key) | EventType::KeyRelease(key) => {
             let pressed = matches!(event.event_type, EventType::KeyPress(_));
@@ -252,7 +256,11 @@ fn handle_event(shared: &InputShared, event: Event) -> Option<Event> {
                     return None;
                 }
 
-                if kb.apply(key, pressed) {
+                // Remap modifiers for the controlled host's OS (Ctrl↔⌘ on Mac)
+                // before forwarding. The exit hotkey was already tested on the
+                // raw key above, so this doesn't affect it.
+                let mapped = remap_for_target(key, shared.target_mac.load(Ordering::SeqCst));
+                if kb.apply(&mapped, pressed) {
                     shared.send(InputMsg::Keyboard(kb.report()));
                 }
             }
@@ -337,6 +345,32 @@ fn track_hotkey(shared: &InputShared, key: &Key, pressed: bool) -> bool {
     false
 }
 
+/// Remap modifier keys for the controlled host's OS. When it's macOS we swap
+/// **Alt ↔ Win** so the modifiers line up with a Mac keyboard's physical
+/// positions:
+///   * **Alt → Command(⌘)** — the spot where ⌘ sits, so it drives ⌘C/⌘V/⌘Tab/…,
+///   * **Win → Option(⌥)**,
+///   * **Ctrl → Control** — left unchanged (HID Ctrl already lands as Mac Control).
+///
+/// The Windows target (default) is the identity. Applied only to *forwarded*
+/// keys — the Ctrl+Alt exit hotkey is detected on the raw key beforehand, so the
+/// escape hatch is unaffected by the swap.
+fn remap_for_target(key: &Key, target_mac: bool) -> Key {
+    if !target_mac {
+        return key.clone();
+    }
+    match key {
+        // Alt → Command(⌘)
+        Key::Alt => Key::MetaLeft,
+        Key::AltGr => Key::MetaRight,
+        // Win → Option(⌥)
+        Key::MetaLeft => Key::Alt,
+        Key::MetaRight => Key::AltGr,
+        // Ctrl is left as-is (→ Mac Control).
+        other => other.clone(),
+    }
+}
+
 fn button_mask(button: &Button) -> Option<u8> {
     match button {
         Button::Left => Some(mbtn::LEFT),
@@ -418,13 +452,17 @@ async fn set_lock(
     acc_wheel: &mut i32,
 ) {
     let shared = &state.input_shared;
-    tracing::info!(
-        active,
-        grab_active = shared.grab_active.load(Ordering::SeqCst),
-        pass_keyboard = shared.pass_keyboard.load(Ordering::SeqCst),
-        pass_mouse = shared.pass_mouse.load(Ordering::SeqCst),
-        "lock transition"
-    );
+
+    // Clear hotkey modifier tracking on every transition. A Ctrl/Alt *release*
+    // can be missed while the app briefly regains focus around a lock change
+    // (WebView2 then swallows those key events), which would otherwise leave a
+    // modifier stuck "down" and make the next session's exit hotkey misfire —
+    // e.g. a lone Ctrl tripping it because Alt still reads as held. Entry is via
+    // the UI button (no modifiers held) and after exit the physical keys no
+    // longer matter, so resetting here is always safe.
+    shared.ctrl_down.store(false, Ordering::SeqCst);
+    shared.alt_down.store(false, Ordering::SeqCst);
+    shared.hotkey_engaged.store(false, Ordering::SeqCst);
 
     if active {
         shared.lock_active.store(true, Ordering::SeqCst);
@@ -433,9 +471,13 @@ async fn set_lock(
         if shared.pass_mouse.load(Ordering::SeqCst) {
             platform::set_cursor_capture(true);
         }
+        // Windows: drop our window out of the foreground so WebView2 doesn't
+        // swallow the keyboard hook (no-op elsewhere). See the function.
+        set_webview_foreground(app, true);
     } else {
         shared.lock_active.store(false, Ordering::SeqCst);
         platform::set_cursor_capture(false);
+        set_webview_foreground(app, false);
         if let Ok(mut kb) = shared.keyboard.lock() {
             kb.reset();
         }
@@ -491,6 +533,54 @@ pub fn on_passthrough_changed(shared: &InputShared, prev: PassthroughFlags, next
 pub fn release_cursor_capture() {
     platform::set_cursor_capture(false);
 }
+
+/// Windows: keep the EmulStick window from being the keyboard-foreground window
+/// while locked, so the global `WH_KEYBOARD_LL` hook actually receives keys.
+///
+/// Chromium/WebView2 swallows low-level keyboard-hook delivery while it holds
+/// keyboard focus, so the grab callback never sees keystrokes typed into our own
+/// window — breaking lock mode and the Ctrl+Alt exit hotkey whenever the app is
+/// foreground, e.g. KVM screen mode (tauri-apps/tauri#13919; same Chromium
+/// behaviour as CEF). The hook fires fine whenever any *other* window is
+/// foreground, so on lock we mark the window non-activating (`WS_EX_NOACTIVATE`)
+/// — so the operator's grab-click can't re-raise it — and hand the foreground to
+/// the desktop shell, leaving our window visible so the KVM video keeps
+/// rendering but no longer the keyboard-foreground window. On unlock we restore
+/// activation and refocus so the UI is usable again. No-op off Windows; the app
+/// needs no keyboard focus of its own (its UI is entirely mouse-driven).
+#[cfg(target_os = "windows")]
+pub fn set_webview_foreground(app: &AppHandle, locked: bool) {
+    let Some(win) = app.webview_windows().into_values().next() else {
+        return;
+    };
+    let Ok(hwnd) = win.hwnd() else { return };
+    let hwnd = hwnd.0 as isize; // HWND isn't Send; carry it across as a pointer.
+    let _ = app.run_on_main_thread(move || unsafe {
+        use winapi::shared::windef::HWND;
+        use winapi::um::winuser::{
+            GetShellWindow, GetWindowLongPtrW, SetForegroundWindow, SetWindowLongPtrW, GWL_EXSTYLE,
+            WS_EX_NOACTIVATE,
+        };
+        let h = hwnd as HWND;
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        if locked {
+            // Non-activating: the operator's grab-click can't re-raise us. Then
+            // hand the foreground to the desktop shell — flash-free, window stays
+            // visible, but it's no longer the keyboard-foreground window.
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE as isize);
+            let shell = GetShellWindow();
+            if !shell.is_null() {
+                SetForegroundWindow(shell);
+            }
+        } else {
+            SetWindowLongPtrW(h, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE as isize));
+            SetForegroundWindow(h);
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_webview_foreground(_app: &AppHandle, _locked: bool) {}
 
 /// Whether the OS trusts this process to capture global input (macOS
 /// Accessibility); always true elsewhere. See [`platform::accessibility_trusted`].
@@ -571,4 +661,31 @@ fn reset_input_state(
     *acc_dx = 0;
     *acc_dy = 0;
     *acc_wheel = 0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_for_target;
+    use rdev::Key;
+
+    #[test]
+    fn windows_target_is_identity() {
+        for k in [Key::ControlLeft, Key::Alt, Key::MetaLeft, Key::AltGr, Key::KeyA] {
+            assert_eq!(remap_for_target(&k, false), k);
+        }
+    }
+
+    #[test]
+    fn mac_target_swaps_alt_and_win_keeps_ctrl() {
+        // Alt → Command(⌘)
+        assert_eq!(remap_for_target(&Key::Alt, true), Key::MetaLeft);
+        assert_eq!(remap_for_target(&Key::AltGr, true), Key::MetaRight);
+        // Win → Option(⌥)
+        assert_eq!(remap_for_target(&Key::MetaLeft, true), Key::Alt);
+        assert_eq!(remap_for_target(&Key::MetaRight, true), Key::AltGr);
+        // Ctrl stays Control; regular keys untouched.
+        assert_eq!(remap_for_target(&Key::ControlLeft, true), Key::ControlLeft);
+        assert_eq!(remap_for_target(&Key::ControlRight, true), Key::ControlRight);
+        assert_eq!(remap_for_target(&Key::KeyC, true), Key::KeyC);
+    }
 }
