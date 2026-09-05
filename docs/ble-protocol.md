@@ -1,124 +1,62 @@
-# BLE Protocol Documentation
+# BLE Transport Notes
 
-This document describes the Bluetooth Low Energy (BLE) protocol implementation used by EmulStick to communicate with host devices.
+> [!NOTE]
+> This document describes how **EmulStick Desktop** uses BLE. It is independent
+> implementation documentation, not a mirror of the vendor specification. For
+> the authoritative device protocol, see the official
+> [EmulStick BLE protocol specification (v0.93)](https://www.emulstick.com/files/emulstick_ble_v0.93.pdf).
 
-> **Authority note.** This file mirrors the upstream EmulStick BLE spec (v0.93)
-> and shows the maximal frame layouts (e.g. an 8-byte mouse frame with a reserved
-> `6–7` tail, and a separate wheel packet). The frames this app actually emits
-> are defined in [`protocol.md`](protocol.md), which is **authoritative for the
-> implementation**: a 6-byte F803 mouse report `[Buttons, X_lo, X_hi, Y_lo,
-> Y_hi, Wheel]` (wheel inline at byte 5, no reserved tail, no separate wheel
-> packet) and an 8-byte F801 keyboard report. The trailing reserved bytes shown
-> below are optional; the encoders in `src-tauri/src/protocol/` omit them.
+## Scope
 
-## Overview
+The desktop application currently uses the BLE channels needed for keyboard and
+mouse forwarding plus standard device-information reads. Other vendor-defined
+channels are intentionally outside the scope of this document.
 
-EmulStick uses Web Bluetooth API to connect to a host device and provides:
-- Keyboard input emulation
-- Mouse movement and click emulation
-- Wheel/scroll emulation
+## Services and characteristics
 
-## Service and Characteristics UUIDs
+| Purpose | UUID | Application behavior |
+| --- | --- | --- |
+| Device Information Service | `0000180A-0000-1000-8000-00805f9b34fb` | Read metadata after connection |
+| Custom service | `0000F800-0000-1000-8000-00805f9b34fb` | Locate the input characteristics |
+| Keyboard | `0000F801-0000-1000-8000-00805f9b34fb` | Write-without-response; subscribe to LED notifications |
+| Mouse | `0000F803-0000-1000-8000-00805f9b34fb` | Write-without-response |
 
-| Type | UUID |
-|------|------|
-| Custom Service | `0000F800-0000-1000-8000-00805f9b34fb` |
-| Keyboard Characteristic | `0000F801-0000-1000-8000-00805f9b34fb` |
-| Mouse Characteristic | `0000F803-0000-1000-8000-00805f9b34fb` |
+The implementation reads firmware revision (`2A26`) and system ID (`2A23`) from
+the Device Information Service when those characteristics are available.
 
-## Connection Flow
+## Connection flow
 
-1. Request and connect to BLE device using Web Bluetooth API
-2. Get primary service using the Custom Service UUID
-3. Get keyboard characteristic using Keyboard Characteristic UUID
-4. Get mouse characteristic using Mouse Characteristic UUID
+1. Scan for a compatible BLE peripheral.
+2. Connect through the platform BLE stack (`btleplug`).
+3. Discover the custom F800 service and F801/F803 characteristics.
+4. Read available Device Information Service metadata.
+5. Subscribe to F801 keyboard-LED notifications.
+6. Forward keyboard and mouse state through write-without-response operations.
+7. On disconnect or teardown, clear local forwarding state and attempt safe
+   release-all behavior where communication is still possible.
 
-## Protocol Packets
+## Reports emitted by this application
 
-All packets are 8 bytes (64 bits) in length.
+The byte layouts that are authoritative for this repository are implemented in
+`src-tauri/src/protocol/` and summarized in [`protocol.md`](protocol.md):
 
-### Keyboard Events
+- **F801 keyboard:** 8 bytes — `[Modifiers, 0x00, Key1..Key6]`
+- **F803 mouse:** 6 bytes — `[Buttons, X_low, X_high, Y_low, Y_high, Wheel]`
 
-**Key Down / Key Up Packet:**
+X/Y mouse deltas are signed little-endian values and the application splits
+large accumulated movement across multiple reports rather than silently
+truncating it.
 
-| Byte | Description |
-|------|-------------|
-| 0 | Operation flags (modifier keys) |
-| 1 | Reserved (0) |
-| 2 | Key code |
-| 3-7 | Reserved (0) |
+## Platform identity note
 
-**Operation Flags (Byte 0):**
-- Bit 0: Left Control
-- Bit 1: Left Shift
-- Bit 2: Left Alt
-- Bit 3: Left GUI (Windows/Command)
-- Bit 4: Right Control
-- Bit 5: Right Shift
-- Bit 6: Right Alt
-- Bit 7: Right GUI
+A BLE peripheral identifier should be treated as an opaque, machine-local
+identifier. Platform BLE APIs do not guarantee that the identifier exposed to
+the application is a portable hardware MAC address across operating systems or
+machines.
 
-### Mouse Events
+## Compatibility
 
-**Mouse Move / Button Packet:**
-
-| Byte | Description |
-|------|-------------|
-| 0 | Operation (button state) |
-| 1 | X position (low byte, Int16) |
-| 2 | X position (high byte, Int16) |
-| 3 | Y position (low byte, Int16) |
-| 4 | Y position (high byte, Int16) |
-| 5 | Wheel value |
-| 6-7 | Reserved (0) |
-
-**Operation Flags (Byte 0):**
-- Bit 0: Left button
-- Bit 1: Right button
-- Bit 2: Middle button
-
-**Position Encoding:**
-- X and Y positions are signed 16-bit integers (Int16) in little-endian format
-- Range: -2047 to +2047
-
-### Wheel Event
-
-| Byte | Description |
-|------|-------------|
-| 0 | 0x00 |
-| 1-4 | Reserved (0) |
-| 5 | Wheel value (signed) |
-| 6-7 | Reserved (0) |
-
-## Key Code Mapping
-
-USB HID key codes:
-
-| Key | Code | Key | Code | Key | Code |
-|-----|------|-----|------|-----|------|
-| A | 4 | 1 | 30 | ENTER | 40 |
-| B | 5 | 2 | 31 | ESCAPE | 41 |
-| C | 6 | 3 | 32 | BACKSPACE | 42 |
-| D | 7 | 4 | 33 | TAB | 43 |
-| E | 8 | 5 | 34 | SPACE | 44 |
-| F | 9 | 6 | 35 | MINUS | 45 |
-| G | 10 | 7 | 36 | EQUALS | 46 |
-| H | 11 | 8 | 37 | OPEN_BRACKET | 47 |
-| I | 12 | 9 | 38 | CLOSE_BRACKET | 48 |
-| J | 13 | 0 | 39 | BACK_SLASH | 49 |
-| K | 14 | | | SEMICOLON | 51 |
-| L | 15 | | | QUOTE | 52 |
-| M | 16 | | | BACK_QUOTE | 53 |
-| N | 17 | | | COMMA | 54 |
-| O | 18 | | | PERIOD | 55 |
-| P | 19 | | | SLASH | 56 |
-| Q | 20 | | | CAPS_LOCK | 57 |
-| R | 21 | | | F1 | 58 |
-| S | 22 | | | F2 | 59 |
-| T | 23 | | | F3 | 60 |
-| U | 24 | | | F4 | 61 |
-| V | 25 | | | F5 | 62 |
-| W | 26 | | | F6 | 63 |
-| X | 27 | | | F7 | 64 |
-| Y | 28 | | | F8 | 65 |
-| Z | 29 | | | F9 | 66 |
+If behavior in these notes differs from the vendor's current official
+specification, the vendor specification should be treated as authoritative for
+the hardware. The source code and tests in this repository remain authoritative
+for what this particular application actually emits.
