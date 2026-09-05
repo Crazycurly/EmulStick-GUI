@@ -2,7 +2,7 @@
 name = "emulstick"
 version = "0.1.0"
 description = "Operator-side console for the EmulStick BLE HID emulator"
-authors = ["EmulStick"]
+authors = ["Crazycurly"]
 edition = "2021"
 rust-version = "1.77.2"
 
