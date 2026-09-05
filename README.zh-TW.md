@@ -17,9 +17,12 @@
 
 </div>
 
+> [!IMPORTANT]
+> **獨立／非官方專案。** EmulStick Desktop 為獨立開發的第三方軟體，並非 EmulStick 硬體製造商的官方產品，亦不代表雙方存在隸屬、背書、贊助或合作關係。EmulStick 名稱及相關標誌的權利歸其各自權利人所有，本專案僅為說明硬體相容性而使用該名稱。
+
 **[EmulStick](https://emulstick.com)** 低功耗藍牙 HID 模擬器的操作端主控台。EmulStick 是一款隨插即用的 USB 2.0 接收器，目標電腦會把它辨識為標準的 USB 鍵盤／滑鼠／搖桿，並透過低功耗藍牙（BLE）接收輸入（免驅動、免配對）。本程式是以 Tauri 2 + Svelte + Rust 打造的原生桌面應用程式，會與接收器連線，把你真實的鍵盤與滑鼠轉送到目標電腦 —— **包含瀏覽器工具永遠攔截不到的系統保留快速鍵**（`⌘Tab`、`Win`、`Ctrl`+`Alt`+`Del`、`⌘`+`Space`…）。再用 USB 擷取卡把目標電腦的 HDMI 畫面接進來，就成了完整的 PiKVM 式遠端主控台 —— 目標端不必安裝任何代理程式，只會看到一個普通的 USB 鍵盤／滑鼠。
 
-> EmulStick 接收器為市售產品 —— 硬體與購買資訊請見 **[emulstick.com](https://emulstick.com)**。本儲存庫是它的桌面操作端程式。
+> EmulStick 接收器為市售產品 —— 硬體與購買資訊請見 **[emulstick.com](https://emulstick.com)**。本儲存庫是與其相容的獨立第三方桌面操作端程式。
 
 <div align="center">
 
@@ -63,13 +66,13 @@
 
 - **前端**（`src/`）—— 掃描/連線/狀態介面、直通開關、KVM 視訊、錯誤提示。僅處理低頻指令／事件。
 - **後端**（`src-tauri/src/`）：
-  - `protocol/` —— HID 報告編碼器（鍵盤 8 B／滑鼠 6 B）、`rdev::Key → HID usage` 對應表，以及標準 BLE UUID。與硬體無關，並針對 [`docs/protocol.md`](docs/protocol.md) 中的範例做逐位元組單元測試。
+  - `protocol/` —— HID 報告編碼器（鍵盤 8 B／滑鼠 6 B）、`rdev::Key → HID usage` 對應表，以及本實作使用的 BLE UUID。與硬體無關，並針對 [`docs/protocol.md`](docs/protocol.md) 中的範例做逐位元組單元測試。
   - `ble/` —— 以 `btleplug` 進行掃描/連線（含連線逾時）、讀取裝置資訊、對 F801/F803 寫入（write-without-response）、LED 通知。
   - `input/` —— `rdev::grab` 執行緒、鎖定模式狀態機、相對游標擷取，以及 §6.3 的滑鼠合併。
   - `ipc/` —— Tauri 指令與事件。
   - `state.rs` —— 直通旗標與鎖定狀態。
 
-完整的工程設計請見 [`docs/plan.md`](docs/plan.md)；傳輸格式請見 [`docs/protocol.md`](docs/protocol.md) / [`docs/ble-protocol.md`](docs/ble-protocol.md) —— 兩者皆源自官方 [EmulStick BLE 通訊協定規格（v0.93）](https://www.emulstick.com/files/emulstick_ble_v0.93.pdf)。
+完整的工程設計請見 [`docs/plan.md`](docs/plan.md)；[`docs/protocol.md`](docs/protocol.md) / [`docs/ble-protocol.md`](docs/ble-protocol.md) 僅記錄本專案實作所需的通訊協定資訊。廠商的權威規格請以官方 [EmulStick BLE 通訊協定規格（v0.93）](https://www.emulstick.com/files/emulstick_ble_v0.93.pdf) 為準。
 
 ## 開發狀態
 
@@ -102,3 +105,7 @@ npx tauri icon app-icon.png                       # 由來源圖片重新產生�
 全域輸入攔截需要在 **「系統設定」→「隱私權與安全性」→「輔助使用」**（可能還需要 **「輸入監控」**）中授權給本 App。若在尚未授權的情況下要求鎖定模式，App 會跳出 macOS 的授權對話框，並顯示一張內建引導卡片，附有 **「開啟設定」** 捷徑；當你切回視窗時會自動重新檢查。藍牙則會在首次使用時透過 `NSBluetoothAlwaysUsageDescription` 提示。
 
 未簽署的版本每次更新都會失去「輔助使用」授權。開發迭代時，`cargo run` 的 runner 會以穩定身分重新簽署（見 [`scripts/sign-and-run.sh`](scripts/sign-and-run.sh)）；若要產生可散布、已公證的發行版本，請見 [`docs/release.md`](docs/release.md)。
+
+## 著作權與第三方軟體
+
+本專案原創內容的著作權由專案作者保留，目前未對原始專案程式碼授予一般性軟體授權。詳見 [`COPYRIGHT`](COPYRIGHT)；第三方元件及其授權資訊請見 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
