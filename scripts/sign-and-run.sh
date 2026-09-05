@@ -14,7 +14,7 @@ set -u
 BIN="${1:-}"
 [ -n "$BIN" ] && shift
 
-IDENTIFIER="com.emulstick.desktop"
+IDENTIFIER="io.github.crazycurly.emulstickdesktop"
 
 # Pick the signing identity: explicit override, else the first Apple Development
 # cert in the keychain.
