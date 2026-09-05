@@ -22,9 +22,12 @@
   let passthrough = $state<PassthroughFlags>({
     keyboard: false,
     mouse: false,
-    video: false,
   });
   let leds = $state<LedReport>({ num: false, caps: false, scroll: false });
+  // OS of the target system being controlled. The backend swaps Alt↔Win on
+  // forwarded keys when this differs from the host OS, so modifiers line up
+  // across a Mac/PC keyboard mismatch. Persisted like passthrough.
+  let targetMac = $state(false);
   let locked = $state(false);
   let scanning = $state(false);
   let lastError = $state<string | null>(null);
@@ -83,11 +86,21 @@
       }),
       events.onKeyboardLeds((l) => (leds = l)),
       events.onError((e) => {
-        // The grab thread couldn't install the hook → almost always a missing
-        // macOS Accessibility grant. The onboarding card is the user-facing
-        // surface for that, so don't also show a raw error line (plan §5).
+        // The grab thread couldn't install the hook. On macOS that's almost
+        // always a missing Accessibility grant, so route it to the onboarding
+        // card instead of a raw error line (plan §5). Other platforms have no
+        // such grant (Windows/Linux hooks need no permission) — the macOS card
+        // would be misleading, so show the backend's actual reason there.
         if (e.code === "input_grab_failed") {
-          needsAccessibility = true;
+          // The global hook isn't installed, so we're not actually capturing —
+          // clear any optimistic "locked" UI (and un-hide the toolbar) so the
+          // operator isn't visually trapped behind a dead exit hotkey.
+          locked = false;
+          if (isMac) {
+            needsAccessibility = true;
+            return;
+          }
+          lastError = humanize(e.message);
           return;
         }
         lastError = humanize(e.message);
@@ -116,6 +129,12 @@
       } else {
         passthrough = await commands.getPassthrough();
       }
+      // Restore the target-system OS choice and mirror it to the backend.
+      targetMac = (await store.get<boolean>("targetMac")) ?? false;
+      await commands.setTargetOs(targetMac);
+      // Restore the last HDMI capture source (VideoFeed falls back to the
+      // default camera if it's no longer present).
+      videoSelectedId = (await store.get<string>("videoSource")) ?? "";
       const di = await commands.getDeviceInfo();
       if (di) {
         info = di;
@@ -143,12 +162,16 @@
     return msg;
   }
 
-  async function run(action: () => Promise<unknown>) {
+  // Returns whether the action succeeded, so callers can persist/revert only on
+  // a backend-accepted change.
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     lastError = null;
     try {
       await action();
+      return true;
     } catch (e) {
       lastError = humanize(String(e));
+      return false;
     }
   }
 
@@ -166,6 +189,9 @@
   const connect = (device: DiscoveredDevice) =>
     run(async () => {
       intentional = false;
+      // Cancel any in-flight reconnect loop so it can't race this connect.
+      reconnectToken++;
+      reconnecting = false;
       await attemptConnect(device.id, device.name);
     });
 
@@ -224,10 +250,27 @@
   }
 
   async function setFlag(key: keyof PassthroughFlags, value: boolean) {
+    const prev = passthrough;
     passthrough = { ...passthrough, [key]: value };
-    await run(() => commands.setPassthrough(passthrough));
-    // Persist so the choice survives a restart (see the restore in onMount).
+    // Revert the optimistic toggle if the backend rejected it, and persist only
+    // a choice the backend actually accepted (see the restore in onMount).
+    if (!(await run(() => commands.setPassthrough(passthrough)))) {
+      passthrough = prev;
+      return;
+    }
     await store?.set("passthrough", passthrough);
+    await store?.save();
+  }
+
+  // Switch the target system's OS (key mapping) and persist the choice.
+  async function setTarget(mac: boolean) {
+    const prev = targetMac;
+    targetMac = mac;
+    if (!(await run(() => commands.setTargetOs(mac)))) {
+      targetMac = prev;
+      return;
+    }
+    await store?.set("targetMac", mac);
     await store?.save();
   }
 
@@ -288,6 +331,16 @@
     };
   });
 
+  // Persist the HDMI capture source ONLY when the operator explicitly picks one
+  // from the dropdown — not when VideoFeed auto-resolves a fallback device (e.g.
+  // the default camera when the remembered source is unplugged), so the saved
+  // preference survives a missing device instead of being overwritten by it.
+  async function pickVideoSource(id: string) {
+    videoSelectedId = id;
+    await store?.set("videoSource", id);
+    await store?.save();
+  }
+
   // Clicking the screen grabs input (PiKVM-style). Exit via the Ctrl+Alt hotkey.
   function grabFromScreen() {
     if (!locked && canGrab) toggleLock();
@@ -312,10 +365,25 @@
   });
 </script>
 
+<!-- OS glyphs as inline SVG: the 🪟 "window" emoji renders as tofu on Windows
+     itself (and varies elsewhere), so the picker draws crisp currentColor marks
+     that inherit the surrounding text colour. -->
+{#snippet osIcon(mac: boolean)}
+  {#if mac}
+    <svg class="os-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zm3.378-3.066c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/>
+    </svg>
+  {:else}
+    <svg class="os-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M3 3h8v8H3zM13 3h8v8h-8zM3 13h8v8H3zM13 13h8v8h-8z"/>
+    </svg>
+  {/if}
+{/snippet}
+
 {#if view === "kvm"}
   <!-- ── PiKVM-style screen mode ──────────────────────────────────────── -->
   <div class="kvm">
-    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} />
+    <VideoFeed bind:devices={videoDevices} bind:selectedId={videoSelectedId} onpick={grabFromScreen} {locked} />
 
     <div class="kvm-bar" class:hidden={barHidden}>
       <button class="kvm-btn" onclick={exitKvm} title="Back to compact">‹ Back</button>
@@ -327,7 +395,7 @@
       <div class="spacer"></div>
 
       {#if videoDevices.length > 1}
-        <select class="kvm-source" bind:value={videoSelectedId} title="HDMI capture source" aria-label="Capture source">
+        <select class="kvm-source" value={videoSelectedId} onchange={(e) => pickVideoSource((e.currentTarget as HTMLSelectElement).value)} title="HDMI capture source" aria-label="Capture source">
           {#each videoDevices as d (d.deviceId)}
             <option value={d.deviceId}>{d.label || "Capture device"}</option>
           {/each}
@@ -336,6 +404,7 @@
 
       <button class="kvm-chip" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} title="Toggle keyboard passthrough" onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
       <button class="kvm-chip" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} title="Toggle mouse passthrough" onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+      <button class="kvm-chip" title="Target system OS — when it differs from this computer, Alt/⌘/Win are remapped so the modifiers line up" onclick={() => setTarget(!targetMac)}>{@render osIcon(targetMac)}{targetMac ? "macOS" : "Windows"}</button>
 
       <button
         class="kvm-grab"
@@ -457,6 +526,14 @@
       <div class="toggles">
         <button class="chip big" class:on={passthrough.keyboard} aria-pressed={passthrough.keyboard} onclick={() => setFlag("keyboard", !passthrough.keyboard)}><span class="dot"></span>⌨️ Keyboard</button>
         <button class="chip big" class:on={passthrough.mouse} aria-pressed={passthrough.mouse} onclick={() => setFlag("mouse", !passthrough.mouse)}><span class="dot"></span>🖱️ Mouse</button>
+      </div>
+
+      <div class="target" role="group" aria-label="Target system OS">
+        <span class="target-label" title="The OS of the system you're controlling. When it differs from this computer, Alt/⌘/Win are remapped so the modifiers line up.">Target system</span>
+        <div class="seg">
+          <button class:sel={!targetMac} aria-pressed={!targetMac} onclick={() => setTarget(false)}>{@render osIcon(false)}Windows</button>
+          <button class:sel={targetMac} aria-pressed={targetMac} onclick={() => setTarget(true)}>{@render osIcon(true)}macOS</button>
+        </div>
       </div>
 
       <button

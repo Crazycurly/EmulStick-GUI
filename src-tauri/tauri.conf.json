@@ -38,6 +38,9 @@
     "macOS": {
       "minimumSystemVersion": "11.0",
       "entitlements": "Entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" }
     }
   },
   "plugins": {}

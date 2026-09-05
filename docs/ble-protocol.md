@@ -2,6 +2,15 @@
 
 This document describes the Bluetooth Low Energy (BLE) protocol implementation used by EmulStick to communicate with host devices.
 
+> **Authority note.** This file mirrors the upstream EmulStick BLE spec (v0.93)
+> and shows the maximal frame layouts (e.g. an 8-byte mouse frame with a reserved
+> `6–7` tail, and a separate wheel packet). The frames this app actually emits
+> are defined in [`protocol.md`](protocol.md), which is **authoritative for the
+> implementation**: a 6-byte F803 mouse report `[Buttons, X_lo, X_hi, Y_lo,
+> Y_hi, Wheel]` (wheel inline at byte 5, no reserved tail, no separate wheel
+> packet) and an 8-byte F801 keyboard report. The trailing reserved bytes shown
+> below are optional; the encoders in `src-tauri/src/protocol/` omit them.
+
 ## Overview
 
 EmulStick uses Web Bluetooth API to connect to a host device and provides:

@@ -1,7 +1,52 @@
 # Vendored `rdev` 0.5.3 — EmulStick patches
 
 Unmodified copy of [`rdev` 0.5.3](https://crates.io/crates/rdev/0.5.3) except for
-two macOS-only changes (Windows/Linux paths untouched).
+two macOS-only changes (Patches 1–2) and two Windows changes (Patches 3–4).
+
+---
+
+## Patch 4 — Windows: skip `Event::name` resolution on the grab thread (`src/windows/grab.rs`)
+
+### The change
+
+`raw_callback` no longer calls `Keyboard::get_name(lpdata)` for KeyPress events;
+it sets `Event { name: None, .. }`. The `EventType`/`KEYBOARD` imports it needed
+are dropped with it.
+
+### Why
+
+Upstream resolves `Event::name` on **every KeyPress** from inside the
+`WH_KEYBOARD_LL` hook. `get_name` → `set_global_state` calls
+`AttachThreadInput(grab_thread, foreground_thread, TRUE)` followed by
+`GetKeyboardState` + `ToUnicodeEx` against the foreground window's thread. Doing
+that synchronously inside a low-level keyboard hook routinely exceeds Windows'
+`LowLevelHooksTimeout` (~300 ms), so the OS **silently stops dispatching the
+keyboard hook**. Symptom: keystrokes bypass `grab` entirely (the host keeps
+typing, reserved combos and the Ctrl+Alt exit hotkey never fire) while the
+**mouse** hook — which never computes a name (`raw_callback`'s `_ => None`) —
+keeps working. That keyboard-only failure is the giveaway.
+
+EmulStick maps the `rdev::Key` enum (`Event::event_type`) via `protocol::keymap`
+and **never reads `Event::name`**, so dropping the name computation is
+behaviourally invisible to us and keeps the keyboard hook alive. This is the
+exact Windows analogue of Patch 1 (macOS skips the Text Services Manager name
+lookup on the grab thread for the same reason).
+
+### Upgrading
+
+If bumping `rdev`, re-apply (or drop the vendor entirely if a future release
+runs name resolution off the hook callback / lets you disable it).
+
+---
+
+## Patch 3 — Windows: map Right-Win / VK 92 (`src/windows/keycodes.rs`)
+
+Upstream's `decl_keycodes!` table has `MetaLeft` (VK 91) but omits the Right
+Windows key (VK 92), so it decodes to `Key::Unknown(92)` and the keymap drops
+it. Added `MetaRight, 92` so the right `Win` key forwards as Right-GUI, matching
+the left key and `protocol::keymap`'s existing `Key::MetaRight` mapping. The
+reversibility test still holds (92 was previously unmapped). Linux/macOS already
+map their right-meta key, so only the Windows table changes.
 
 ---
 

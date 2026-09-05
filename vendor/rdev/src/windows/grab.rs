@@ -1,5 +1,5 @@
-use crate::rdev::{Event, EventType, GrabError};
-use crate::windows::common::{convert, set_key_hook, set_mouse_hook, HookError, HOOK, KEYBOARD};
+use crate::rdev::{Event, GrabError};
+use crate::windows::common::{convert, set_key_hook, set_mouse_hook, HookError, HOOK};
 use std::ptr::null_mut;
 use std::time::SystemTime;
 use winapi::um::winuser::{CallNextHookEx, GetMessageA, HC_ACTION};
@@ -10,17 +10,21 @@ unsafe extern "system" fn raw_callback(code: i32, param: usize, lpdata: isize) -
     if code == HC_ACTION {
         let opt = convert(param, lpdata);
         if let Some(event_type) = opt {
-            let name = match &event_type {
-                EventType::KeyPress(_key) => match (*KEYBOARD).lock() {
-                    Ok(mut keyboard) => keyboard.get_name(lpdata),
-                    Err(_) => None,
-                },
-                _ => None,
-            };
+            // PATCH 4 (EmulStick) — do NOT resolve `Event::name` here. Upstream
+            // calls `Keyboard::get_name` on every KeyPress, which runs
+            // `AttachThreadInput` + `GetKeyboardState` + `ToUnicodeEx` against
+            // the foreground thread from *inside* the WH_KEYBOARD_LL callback.
+            // That work routinely exceeds `LowLevelHooksTimeout` (~300 ms), so
+            // Windows silently stops calling the keyboard hook — keystrokes then
+            // bypass the grab (host keeps typing, the Ctrl+Alt exit hotkey never
+            // fires) while the mouse hook, which never computes a name, keeps
+            // working. EmulStick maps `Key` (event_type) only and never reads
+            // `name`, so dropping it is behaviourally invisible. This is the
+            // Windows twin of the macOS TSM patch — see vendor/rdev/PATCH.md.
             let event = Event {
                 event_type,
                 time: SystemTime::now(),
-                name,
+                name: None,
             };
             if let Some(callback) = &mut GLOBAL_CALLBACK {
                 if callback(event).is_none() {

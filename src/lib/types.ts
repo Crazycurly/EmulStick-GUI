@@ -25,7 +25,6 @@ export interface DeviceInfo {
 export interface PassthroughFlags {
   keyboard: boolean;
   mouse: boolean;
-  video: boolean;
 }
 
 export interface LedReport {

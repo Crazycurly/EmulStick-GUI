@@ -91,5 +91,45 @@ xcrun stapler validate \
 
 ## Windows
 
-No code-signing is required for low-level hooks to work, though an unsigned
-binary may trip SmartScreen/AV. Authenticode signing is out of scope for M5.
+Windows builds must be produced **on Windows** — the macOS dev machine can't
+cross-compile the WinRT (BLE), WebView2, and Win32 (cursor capture) paths, and
+the bundler's resource compiler isn't available there.
+
+### Build
+
+On a Windows 10/11 machine with Node, Rust (MSVC host toolchain), and the
+WebView2 runtime (preinstalled on Win11 and current Win10):
+
+```powershell
+npm ci
+npm run tauri build
+```
+
+Outputs land in `src-tauri/target/release/bundle/`:
+
+- **NSIS** installer → `nsis/EmulStick_<version>_x64-setup.exe`
+- **WiX MSI** → `msi/EmulStick_<version>_x64_en-US.msi`
+
+The installer uses `webviewInstallMode: downloadBootstrapper`
+(`src-tauri/tauri.conf.json`), so it fetches the WebView2 runtime at install time
+if the machine doesn't already have it.
+
+### CI
+
+[`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)
+builds the same NSIS + MSI artifacts on `windows-latest` for every push to
+`main`/the active branch, every `v*` tag, PRs to `main`, and manual dispatch.
+Download them from the **Artifacts** section of the workflow run. This is also
+the authoritative Windows compile check for changes authored on macOS.
+
+### First-run & permissions
+
+- **Bluetooth** must be enabled (system radio on). No manifest capability is
+  needed for a classic desktop build, and there is **no Accessibility-style
+  grant** — low-level keyboard/mouse hooks (`WH_KEYBOARD_LL`/`WH_MOUSE_LL`) work
+  without one. The exit hotkey is **Ctrl + LeftAlt** (AltGr is excluded so it
+  doesn't trip on international layouts).
+- **Code-signing** is not required for hooks to work, but an unsigned binary may
+  trip SmartScreen ("Windows protected your PC" → *More info* → *Run anyway*) or
+  AV heuristics that flag global keyboard hooks. Authenticode signing is out of
+  scope for now (would remove those warnings on other machines).
