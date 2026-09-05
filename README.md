@@ -31,12 +31,15 @@ Operator-side console for the **[EmulStick](https://emulstick.com)** BLE HID emu
 
 ## Download
 
-**[⬇ Download the latest release](https://github.com/Crazycurly/EmulStick-GUI/releases/latest)** — macOS (Apple Silicon).
+EmulStick Desktop is available for macOS (Apple Silicon) and Windows x64.
 
-Open the `.dmg` and drag **EmulStick** to your Applications folder.
+| Platform | Download and installation |
+| --- | --- |
+| macOS (Apple Silicon) | Download the `.dmg` from the **[latest release](https://github.com/Crazycurly/EmulStick-GUI/releases/latest)**, open it, and drag **EmulStick** to your Applications folder. |
+| Windows (x64) | Download either the NSIS `.exe` or WiX `.msi` installer from the **[latest release](https://github.com/Crazycurly/EmulStick-GUI/releases/latest)** and run it. |
 
 > [!NOTE]
-> The build is code-signed for development but **not notarized**, so macOS Gatekeeper will flag it on first launch. Either right-click the app → **Open** once, or clear the quarantine flag:
+> The macOS build is code-signed for development but **not notarized**, so Gatekeeper will flag it on first launch. Either right-click the app → **Open** once, or clear the quarantine flag:
 > ```bash
 > xattr -dr com.apple.quarantine /Applications/EmulStick.app
 > ```
